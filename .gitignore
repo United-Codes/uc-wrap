@@ -1,0 +1,6 @@
+# Test binaries
+*.test
+*.out
+
+# Built CLI binary (if built into the repo root)
+/plsqlwrap-bin
