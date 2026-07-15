@@ -28,19 +28,27 @@ func Obfuscate(source, passphrase string, keepComments bool) (string, error) {
 		clean = stripComments(source)
 	}
 
-	// Per-call protected set, seeded with the global reserved words.
+	// Collision-avoidance set for generated short names, seeded with the global
+	// reserved words plus header / package-spec / parameter identifiers (so a
+	// generated short name can never shadow a public name) plus every identifier
+	// already present in the source (via allIDs below).
 	reserved := make(map[string]struct{}, len(reservedWords))
 	for w := range reservedWords {
 		reserved[w] = struct{}{}
 	}
-
 	protectHeaderIdentifiers(clean, reserved)
 	protectPackageSpec(clean, reserved)
 	protectParameters(clean, reserved)
-
-	freq := collectIdentifiers(clean, reserved)
 	allIDs := collectAllIdentifiers(clean)
-	mapping := makeMapping(freq, allIDs, reserved)
+
+	// Only rename names we can prove are locally declared (variables, constants,
+	// exceptions, cursors, local types). Everything else — schema objects
+	// referenced in embedded SQL, public subprogram names, parameters,
+	// package-spec names — is left untouched so the obfuscated unit still
+	// compiles identically to the original.
+	locals := collectRenamableLocals(clean)
+	freq, orig := countLocalOccurrences(clean, locals)
+	mapping := makeMapping(freq, allIDs, reserved) // UPPER(name) -> short
 
 	obfuscated := clean
 	if len(mapping) > 0 {
@@ -48,15 +56,11 @@ func Obfuscate(source, passphrase string, keepComments bool) (string, error) {
 	}
 	obfuscated = stripFormatting(obfuscated)
 
-	// Reverse map (short -> original), including an uppercase alias so
-	// deobfuscation works whether or not the wrapper uppercased the source.
-	reverse := make(map[string]string, len(mapping)*2)
-	for orig, short := range mapping {
-		reverse[short] = orig
-		up := strings.ToUpper(short)
-		if up != short {
-			reverse[up] = orig
-		}
+	// Reverse map: UPPER(short) -> original spelling. Identifier matching is
+	// case-insensitive, so a single uppercased key suffices.
+	reverse := make(map[string]string, len(mapping))
+	for up, short := range mapping {
+		reverse[strings.ToUpper(short)] = orig[up]
 	}
 	mapStr := mappingToString(reverse)
 	if mapStr == "" {
@@ -207,12 +211,24 @@ func isDigit(c byte) bool { return c >= '0' && c <= '9' }
 
 func isAlnum(c byte) bool { return isAlpha(c) || isDigit(c) }
 
-// skipToNextID advances past string literals, comments and quoted identifiers,
-// returning the index of the next identifier-start character (or len(s)).
-func skipToNextID(s string, i int) int {
-	for i < len(s) {
+// tkn is a coarse PL/SQL token used by the declaration scanner.
+type tkn struct {
+	kind byte   // 'i' identifier, 'n' number, 's' symbol (1–2 chars), 'q' string/quoted-ident
+	text string // original text
+	up   string // uppercased text (identifiers only)
+}
+
+// tokenizePLSQL splits s into coarse tokens, discarding whitespace and comments
+// and treating string literals and quoted identifiers as opaque.
+func tokenizePLSQL(s string) []tkn {
+	var toks []tkn
+	for i := 0; i < len(s); {
+		c := s[i]
 		switch {
-		case s[i] == '\'':
+		case c == ' ' || c == '\t' || c == '\n' || c == '\r':
+			i++
+		case c == '\'':
+			st := i
 			i++
 			for i < len(s) {
 				if s[i] == '\'' {
@@ -225,60 +241,253 @@ func skipToNextID(s string, i int) int {
 				}
 				i++
 			}
-		case s[i] == '-' && i+1 < len(s) && s[i+1] == '-':
+			toks = append(toks, tkn{kind: 'q', text: s[st:i]})
+		case c == '-' && i+1 < len(s) && s[i+1] == '-':
 			i += 2
 			for i < len(s) && s[i] != '\n' && s[i] != '\r' {
 				i++
 			}
-		case s[i] == '/' && i+1 < len(s) && s[i+1] == '*':
+		case c == '/' && i+1 < len(s) && s[i+1] == '*':
 			i += 2
 			for i+1 < len(s) && !(s[i] == '*' && s[i+1] == '/') {
 				i++
 			}
-			i += 2
-		case s[i] == '"':
+			if i+1 < len(s) {
+				i += 2
+			}
+		case c == '"':
+			st := i
 			i++
 			for i < len(s) && s[i] != '"' {
 				i++
 			}
-			i++
-		case !isIDStart(s[i]):
-			i++
+			if i < len(s) {
+				i++
+			}
+			toks = append(toks, tkn{kind: 'q', text: s[st:i]})
+		case isDigit(c):
+			st := i
+			for i < len(s) && (isIDChar(s[i]) || s[i] == '.') {
+				i++
+			}
+			toks = append(toks, tkn{kind: 'n', text: s[st:i]})
+		case isIDStart(c):
+			st := i
+			for i < len(s) && isIDChar(s[i]) {
+				i++
+			}
+			w := s[st:i]
+			toks = append(toks, tkn{kind: 'i', text: w, up: strings.ToUpper(w)})
+		case c == ':' && i+1 < len(s) && s[i+1] == '=':
+			toks = append(toks, tkn{kind: 's', text: ":="})
+			i += 2
 		default:
-			return i
+			toks = append(toks, tkn{kind: 's', text: string(c)})
+			i++
 		}
 	}
-	return i
+	return toks
 }
 
-// collectIdentifiers returns identifier -> frequency, skipping reserved words,
-// names of length <= 2, and digit-leading tokens.
-func collectIdentifiers(s string, reserved map[string]struct{}) map[string]int {
-	freq := make(map[string]int)
-	i := 0
-	for i < len(s) {
-		i = skipToNextID(s, i)
-		if i >= len(s) || !isIDStart(s[i]) {
-			break
+// collectRenamableLocals returns the set of UPPER-cased identifier names that
+// are SAFE to rename: names declared in a declarative region (after IS/AS or
+// DECLARE, before BEGIN) as variables, constants, exceptions, cursors, or
+// types. Public subprogram names, parameters, package-spec identifiers, and —
+// crucially — everything inside embedded SQL or executable code is excluded, so
+// renaming them can never change which schema object a statement resolves to.
+//
+// The scanner tracks block nesting (subprogram/package/anonymous-block bodies
+// open a declarative frame at IS/AS/DECLARE and switch to executable at BEGIN;
+// END pops a frame, while END IF/LOOP/CASE and bare CASE-expression ENDs do
+// not). When in doubt it declines to collect — over-collection (which could
+// rename a schema name) is the only unsafe direction.
+func collectRenamableLocals(s string) map[string]struct{} {
+	toks := tokenizePLSQL(s)
+	locals := make(map[string]struct{})
+
+	type frame struct{ inDecl bool }
+	var frames []frame
+	inDecl := func() bool { return len(frames) > 0 && frames[len(frames)-1].inDecl }
+
+	expectIS := false   // a PACKAGE/PROCEDURE/FUNCTION header is open; next top-level IS/AS opens a decl frame
+	atStmtStart := true // are we at the first token of a declaration item?
+	parenDepth := 0
+	caseDepth := 0
+
+	add := func(t tkn) {
+		if t.kind != 'i' || len(t.text) <= 2 || isDigit(t.text[0]) || isReserved(t.text) {
+			return
 		}
-		start := i
-		for i < len(s) && isIDChar(s[i]) {
+		locals[t.up] = struct{}{}
+	}
+
+	for j := 0; j < len(toks); j++ {
+		t := toks[j]
+		if t.kind == 's' {
+			switch t.text {
+			case "(":
+				parenDepth++
+			case ")":
+				if parenDepth > 0 {
+					parenDepth--
+				}
+			case ";":
+				if parenDepth == 0 {
+					expectIS = false
+					atStmtStart = inDecl()
+				}
+			}
+			continue
+		}
+		if t.kind != 'i' {
+			continue
+		}
+		switch t.up {
+		case "PACKAGE", "PROCEDURE", "FUNCTION":
+			expectIS = true
+			atStmtStart = false
+		case "DECLARE":
+			frames = append(frames, frame{inDecl: true})
+			atStmtStart = true
+		case "IS", "AS":
+			if expectIS && parenDepth == 0 {
+				frames = append(frames, frame{inDecl: true})
+				expectIS = false
+				atStmtStart = true
+			}
+		case "BEGIN":
+			if len(frames) > 0 && frames[len(frames)-1].inDecl {
+				frames[len(frames)-1].inDecl = false
+			} else {
+				frames = append(frames, frame{inDecl: false})
+			}
+			atStmtStart = false
+		case "CASE":
+			caseDepth++
+			atStmtStart = false
+		case "END":
+			var nxt tkn
+			if j+1 < len(toks) {
+				nxt = toks[j+1]
+			}
+			switch {
+			case nxt.kind == 'i' && (nxt.up == "IF" || nxt.up == "LOOP"):
+				// control-structure end, not a scope
+			case nxt.kind == 'i' && nxt.up == "CASE":
+				if caseDepth > 0 {
+					caseDepth--
+				}
+			case caseDepth > 0:
+				caseDepth-- // bare END closing a CASE expression
+			default:
+				if len(frames) > 0 {
+					frames = frames[:len(frames)-1]
+				}
+			}
+			atStmtStart = false
+		default:
+			if inDecl() && parenDepth == 0 && atStmtStart {
+				switch t.up {
+				case "CURSOR", "TYPE", "SUBTYPE":
+					if j+1 < len(toks) && toks[j+1].kind == 'i' {
+						add(toks[j+1])
+					}
+				case "PRAGMA":
+					// skip the whole pragma
+				default:
+					// A variable/constant/exception declaration: t is the
+					// declared name iff the next token introduces a type
+					// (another identifier, or the CONSTANT/EXCEPTION keyword).
+					if j+1 < len(toks) && toks[j+1].kind == 'i' {
+						add(t)
+					}
+				}
+				atStmtStart = false
+			}
+		}
+	}
+	return locals
+}
+
+// countLocalOccurrences counts, per UPPER-cased local name, how often it occurs
+// as a standalone (non-member) identifier, and records the first original
+// spelling seen. The frequency drives short-name assignment; the spelling is
+// the deobfuscation target.
+func countLocalOccurrences(s string, locals map[string]struct{}) (map[string]int, map[string]string) {
+	freq := make(map[string]int)
+	orig := make(map[string]string)
+	var prevSig byte
+	for i := 0; i < len(s); {
+		c := s[i]
+		switch {
+		case c == '\'':
+			i++
+			for i < len(s) {
+				if s[i] == '\'' {
+					if i+1 < len(s) && s[i+1] == '\'' {
+						i += 2
+						continue
+					}
+					i++
+					break
+				}
+				i++
+			}
+			prevSig = '\''
+		case c == '-' && i+1 < len(s) && s[i+1] == '-':
+			i += 2
+			for i < len(s) && s[i] != '\n' && s[i] != '\r' {
+				i++
+			}
+			prevSig = 0
+		case c == '/' && i+1 < len(s) && s[i+1] == '*':
+			i += 2
+			for i+1 < len(s) && !(s[i] == '*' && s[i+1] == '/') {
+				i++
+			}
+			if i+1 < len(s) {
+				i += 2
+			}
+			prevSig = 0
+		case c == '"':
+			i++
+			for i < len(s) && s[i] != '"' {
+				i++
+			}
+			if i < len(s) {
+				i++
+			}
+			prevSig = '"'
+		case isIDStart(c):
+			st := i
+			for i < len(s) && isIDChar(s[i]) {
+				i++
+			}
+			if prevSig != '.' {
+				up := strings.ToUpper(s[st:i])
+				if _, ok := locals[up]; ok {
+					freq[up]++
+					if _, seen := orig[up]; !seen {
+						orig[up] = s[st:i]
+					}
+				}
+			}
+			prevSig = 'a'
+		case c == ' ' || c == '\t' || c == '\n' || c == '\r':
+			i++
+		case c == '.':
+			if prevSig == '.' { // second dot of a '..' range operator
+				prevSig = 0
+			} else {
+				prevSig = '.'
+			}
+			i++
+		default:
+			prevSig = c
 			i++
 		}
-		word := s[start:i]
-		up := strings.ToUpper(word)
-		if _, ok := reserved[up]; ok {
-			continue
-		}
-		if len(word) <= 2 {
-			continue
-		}
-		if isDigit(word[0]) {
-			continue
-		}
-		freq[word]++
 	}
-	return freq
+	return freq, orig
 }
 
 // collectAllIdentifiers returns the set of every identifier in s (uppercased),
@@ -356,16 +565,22 @@ func shortName(idx int) string {
 	return string(b)
 }
 
-// replaceIdentifiers rewrites identifiers per mapping while copying strings,
-// comments, quoted identifiers and dotted references (pkg.func) verbatim.
+// replaceIdentifiers rewrites identifiers per mapping (keyed by UPPER-cased
+// name, so matching is case-insensitive) while copying strings, comments and
+// quoted identifiers verbatim. An identifier whose immediately preceding
+// significant character is '.' is a member/qualified reference (pkg.func,
+// rec.field) and is left untouched; the BASE of such a reference is still
+// renamed when it is a mapped local, which keeps renaming consistent.
 func replaceIdentifiers(s string, mapping map[string]string) string {
 	var out strings.Builder
 	out.Grow(len(s))
+	var prevSig byte // last non-whitespace byte consumed from the source
 	i := 0
 	for i < len(s) {
+		c := s[i]
 		switch {
-		case s[i] == '\'':
-			out.WriteByte(s[i])
+		case c == '\'':
+			out.WriteByte(c)
 			i++
 			for i < len(s) {
 				out.WriteByte(s[i])
@@ -380,16 +595,18 @@ func replaceIdentifiers(s string, mapping map[string]string) string {
 				}
 				i++
 			}
-		case s[i] == '-' && i+1 < len(s) && s[i+1] == '-':
-			out.WriteByte(s[i])
+			prevSig = '\''
+		case c == '-' && i+1 < len(s) && s[i+1] == '-':
+			out.WriteByte(c)
 			out.WriteByte(s[i+1])
 			i += 2
 			for i < len(s) && s[i] != '\n' && s[i] != '\r' {
 				out.WriteByte(s[i])
 				i++
 			}
-		case s[i] == '/' && i+1 < len(s) && s[i+1] == '*':
-			out.WriteByte(s[i])
+			prevSig = 0
+		case c == '/' && i+1 < len(s) && s[i+1] == '*':
+			out.WriteByte(c)
 			out.WriteByte(s[i+1])
 			i += 2
 			for i+1 < len(s) && !(s[i] == '*' && s[i+1] == '/') {
@@ -401,8 +618,9 @@ func replaceIdentifiers(s string, mapping map[string]string) string {
 				out.WriteByte(s[i+1])
 				i += 2
 			}
-		case s[i] == '"':
-			out.WriteByte(s[i])
+			prevSig = 0
+		case c == '"':
+			out.WriteByte(c)
 			i++
 			for i < len(s) && s[i] != '"' {
 				out.WriteByte(s[i])
@@ -412,49 +630,37 @@ func replaceIdentifiers(s string, mapping map[string]string) string {
 				out.WriteByte(s[i])
 				i++
 			}
-		case isIDStart(s[i]):
+			prevSig = '"'
+		case isIDStart(c):
 			start := i
 			for i < len(s) && isIDChar(s[i]) {
 				i++
 			}
 			word := s[start:i]
-
-			// Look ahead for a dot => dotted reference, keep the chain intact.
-			peek := i
-			for peek < len(s) && (s[peek] == ' ' || s[peek] == '\t') {
-				peek++
-			}
-			if peek < len(s) && s[peek] == '.' {
-				out.WriteString(word)
-				for i < len(s) {
-					if s[i] == '.' {
-						out.WriteByte(s[i])
-						i++
-						continue
-					}
-					if isIDStart(s[i]) {
-						for i < len(s) && isIDChar(s[i]) {
-							out.WriteByte(s[i])
-							i++
-						}
-						p := i
-						for p < len(s) && (s[p] == ' ' || s[p] == '\t') {
-							p++
-						}
-						if !(p < len(s) && s[p] == '.') {
-							break
-						}
-					} else {
-						break
-					}
-				}
-			} else if repl, ok := mapping[word]; ok {
+			if prevSig == '.' {
+				out.WriteString(word) // member access — never rename
+			} else if repl, ok := mapping[strings.ToUpper(word)]; ok {
 				out.WriteString(repl)
 			} else {
 				out.WriteString(word)
 			}
+			prevSig = 'a'
+		case c == ' ' || c == '\t' || c == '\n' || c == '\r':
+			out.WriteByte(c)
+			i++
+		case c == '.':
+			out.WriteByte(c)
+			// The second dot of a '..' range operator must not mark the next
+			// identifier as a member (it's an operand, e.g. 1..coll.count).
+			if prevSig == '.' {
+				prevSig = 0
+			} else {
+				prevSig = '.'
+			}
+			i++
 		default:
-			out.WriteByte(s[i])
+			out.WriteByte(c)
+			prevSig = c
 			i++
 		}
 	}
