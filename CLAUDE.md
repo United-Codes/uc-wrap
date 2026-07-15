@@ -24,7 +24,9 @@ for algorithm questions and a cross-check oracle (its `unwrap`/`wrap` binary).
   - `crypto.go` — AES-256-CBC + PBKDF2-HMAC-SHA256 (100k iters) + PKCS7; wire format `salt(16)||IV(16)||ciphertext`.
   - `reserved.go` — PL/SQL reserved words the obfuscator never renames.
 - `cmd/plsqlwrap/main.go` — subcommand CLI (`wrap`/`unwrap`/`obfuscate`/`deobfuscate`), stdin/`-i`, stdout/`-o`.
-- `testdata/` — committed golden fixtures (real `DBMS_DDL.WRAP` output).
+- `testdata/` — committed golden fixtures (real `DBMS_DDL.WRAP` output);
+  `testdata/realworld/` holds sampled UC package spec+body pairs for the
+  install-into-DB tests.
 
 ## V2 format (the essentials)
 
@@ -67,6 +69,33 @@ Obfuscate→Deobfuscate restores identifier **names** but not original formattin
 (the obfuscator strips formatting; deobfuscate re-indents). Tests assert names,
 not exact layout.
 
+## Obfuscator: rename only what's provably safe
+
+`Obfuscate` renames **only locally-declared names** (variables, constants,
+exceptions, cursors, local types), so the obfuscated unit compiles identically
+to the original. `collectRenamableLocals` (in `obfuscate.go`) does a coarse
+block-structure scan over `tokenizePLSQL` output: it opens a *declarative* frame
+at a package/subprogram `IS`/`AS` or `DECLARE`, switches to *executable* at
+`BEGIN`, and pops at `END` (while `END IF`/`LOOP`/`CASE` and bare CASE-expression
+`END`s don't pop). It collects the first identifier of each declaration in a
+declarative frame only — so schema objects in embedded SQL, public subprogram
+names, parameters, and package-spec names are **never** renamed. Over-collection
+is the only unsafe direction, so the scanner declines when unsure.
+
+`replaceIdentifiers` renames case-insensitively (mapping keyed by UPPER name) and
+renames the **base** of a qualified reference but never a member after `.`
+(`rec.field` → base renamed, `field` kept). The `..` range operator is special-
+cased so `1..coll.count` doesn't treat `coll` as a member (that bug caused
+`PLS-00201 … .COUNT must be declared`). Don't reintroduce a "copy the whole
+dotted chain verbatim" shortcut — it leaves the base unrenamed and breaks
+consistency for local records/collections.
+
+This is a deliberate divergence from the C++ reference, whose obfuscator renames
+by a protect-list and corrupts embedded SQL / public names (it does not reliably
+compile). Multi-unit obfuscation (spec+body in one file) is unsupported in both
+tools — `stripFormatting` joins all lines so `WrapObfuscated` can't find the
+second `CREATE`; obfuscate one unit per file.
+
 ## Tests
 
 - `go test ./...` — hermetic (unit, round-trip, golden fixtures). Keep these green and DB-free.
@@ -75,6 +104,21 @@ not exact layout.
   These prove Go unwraps real `DBMS_DDL.WRAP` output and Go-wrapped/obfuscated
   objects install and run. DB tests live in `db_integration_test.go` behind the
   `//go:build dbtest` tag.
+- `realworld_db_test.go` (same tag) wraps/obfuscates a sample of genuine UC
+  package bodies committed under `testdata/realworld/<OBJECT>.{pks,pkb}` (11
+  units, incl. `UC_GUIDEDTOUR`; `APE_DICTIONARY_VIEWS` at ~1670 base64 lines —
+  the terminator stress case; and conditional-compilation-heavy units like
+  `AOP_API25_PKG` / `APE_JSON_DOC` with `$IF/$THEN/$END`, plus local-type-heavy
+  `UC_CRYPTO` — these stress the obfuscator's block scanner, and the live DB
+  confirms `$END` mis-tokenization never causes unsafe over-collection) and
+  installs them. The wrap test asserts the wrapped body's `USER_ERRORS`
+  are byte-identical to the plain normalized source's (transparent wrap) and that
+  nothing is rejected as malformed. The obfuscate test asserts Oracle accepts the
+  unit (no malformed) **and the obfuscated body's error texts equal the plain
+  source's** (the safe obfuscator introduces no new errors — it compiles
+  equivalently), then unwrap+deobfuscate restores every renamed local. Errors
+  are compared dependency-robustly: these packages reference objects absent in
+  the test schema, but those errors appear equally on both sides.
 
 To regenerate a golden fixture: `SELECT DBMS_DDL.WRAP('CREATE OR REPLACE ...')
 FROM dual` via SQLcl and save the wrapped text to `testdata/`.
