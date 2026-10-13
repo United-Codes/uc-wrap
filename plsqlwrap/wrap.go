@@ -6,6 +6,7 @@ import (
 	"crypto/sha1"
 	"encoding/base64"
 	"fmt"
+	"regexp"
 	"strings"
 )
 
@@ -54,27 +55,29 @@ func WrapV2(source string, keepComments, preserveCase bool) string {
 		normalized = restoreObjectNameCase(normalized, header)
 	}
 
-	// 4. zlib deflate (best compression).
-	compressed := zlibDeflate(normalized)
-	if len(compressed) == 0 {
-		return source
+	// 4-8. zlib deflate, SHA-1 digest, inverse substitution cipher, base64.
+	// A first base64 line starting with '/' would be mistaken for a statement
+	// terminator by SQL script splitters (and splitBase64 cannot shorten the
+	// first line), so fall back to a lower compression level, which changes
+	// the digest and thus the first character, until it does not start with '/'.
+	var b64 string
+	for level := zlib.BestCompression; level >= zlib.BestSpeed; level-- {
+		compressed := zlibDeflate(normalized, level)
+		if len(compressed) == 0 {
+			return source
+		}
+		digest := sha1.Sum(compressed)
+		payload := make([]byte, 0, 20+len(compressed))
+		payload = append(payload, digest[:]...)
+		payload = append(payload, compressed...)
+		for i, b := range payload {
+			payload[i] = cipherTo[b]
+		}
+		b64 = base64.StdEncoding.EncodeToString(payload)
+		if !strings.HasPrefix(b64, "/") {
+			break
+		}
 	}
-
-	// 5. SHA-1 digest of the compressed data.
-	digest := sha1.Sum(compressed)
-
-	// 6. Prepend digest to compressed data.
-	payload := make([]byte, 0, 20+len(compressed))
-	payload = append(payload, digest[:]...)
-	payload = append(payload, compressed...)
-
-	// 7. Inverse substitution cipher.
-	for i, b := range payload {
-		payload[i] = cipherTo[b]
-	}
-
-	// 8. Base64 encode.
-	b64 := base64.StdEncoding.EncodeToString(payload)
 
 	// 9. Build the wrapped output (Oracle 19c+ format).
 	var sb strings.Builder
@@ -85,7 +88,8 @@ func WrapV2(source string, keepComments, preserveCase bool) string {
 	for i := 0; i < 15; i++ {
 		sb.WriteString("abcd\n")
 	}
-	sb.WriteString("8\n")
+	sb.WriteString(objectTypeCode(header))
+	sb.WriteByte('\n')
 
 	// Terminator: <uncompressed length> <lcode length>, both hex.
 	//
@@ -97,26 +101,68 @@ func WrapV2(source string, keepComments, preserveCase bool) string {
 	// The upstream C++ tool used len(b64)+1, which only matches when the
 	// payload fits in <= 2 lines; Oracle 23ai rejects a wrong value with
 	// PLS-00753 ("malformed or corrupted wrapped unit") for larger units.
-	numLines := (len(b64) + 71) / 72
-	if numLines < 1 {
-		numLines = 1
-	}
-	fmt.Fprintf(&sb, "%x %x\n", len(normalized), len(b64)+numLines-1)
+	lines := splitBase64(b64, 72)
+	fmt.Fprintf(&sb, "%x %x\n", len(normalized), len(b64)+len(lines)-1)
 
-	for i := 0; i < len(b64); i += 72 {
-		end := i + 72
-		if end > len(b64) {
-			end = len(b64)
-		}
-		sb.WriteString(b64[i:end])
+	for _, l := range lines {
+		sb.WriteString(l)
 		sb.WriteByte('\n')
 	}
 	sb.WriteString("\n/\n")
 	return sb.String()
 }
 
+// splitBase64 breaks b64 into lines of (at most) width characters. A line that
+// would start with '/' is avoided by ending the previous line one character
+// early: SQL script splitters (e.g. APEX SQL Workshop) may treat a line that
+// begins with '/' as a statement terminator and cut the wrapped unit in half.
+func splitBase64(b64 string, width int) []string {
+	var lines []string
+	for i := 0; i < len(b64); {
+		end := i + width
+		if end >= len(b64) {
+			end = len(b64)
+		} else {
+			for end > i+1 && b64[end] == '/' {
+				end--
+			}
+		}
+		lines = append(lines, b64[i:end])
+		i = end
+	}
+	if len(lines) == 0 {
+		lines = []string{""}
+	}
+	return lines
+}
+
+var objectTypeRe = regexp.MustCompile(`(?i)\b(package\s+body|type\s+body|package|function|procedure|type)\b`)
+
+// objectTypeCode returns the single-character object type code Oracle writes
+// after the "abcd" filler lines of a wrapped unit (as produced by
+// DBMS_DDL.WRAP): 9 package, b package body, 8 function, 7 procedure, d type,
+// e type body. Unknown headers fall back to 8.
+func objectTypeCode(header string) string {
+	m := objectTypeRe.FindString(header)
+	switch strings.Join(strings.Fields(strings.ToLower(m)), " ") {
+	case "package":
+		return "9"
+	case "package body":
+		return "b"
+	case "function":
+		return "8"
+	case "procedure":
+		return "7"
+	case "type":
+		return "d"
+	case "type body":
+		return "e"
+	}
+	return "8"
+}
+
 // stripComments removes -- single-line and /* */ multi-line comments, leaving
-// the contents of '...' string literals (including '' escapes) untouched.
+// the contents of '...' string literals (including ” escapes) untouched.
 // Newlines that followed a -- comment are preserved.
 func stripComments(s string) string {
 	var out strings.Builder
@@ -216,7 +262,7 @@ func keywordAt(s string, i int, kw string) bool {
 
 // upperPreservingStrings uppercases everything except the contents of '...'
 // string literals. A single quote toggles literal mode (mirroring the
-// reference implementation, which does not special-case '' escapes here).
+// reference implementation, which does not special-case ” escapes here).
 func upperPreservingStrings(s string) string {
 	b := []byte(s)
 	inString := false
@@ -289,9 +335,9 @@ func restoreObjectNameCase(normalized, header string) string {
 	return string(b)
 }
 
-func zlibDeflate(in string) []byte {
+func zlibDeflate(in string, level int) []byte {
 	var buf bytes.Buffer
-	w, err := zlib.NewWriterLevel(&buf, zlib.BestCompression)
+	w, err := zlib.NewWriterLevel(&buf, level)
 	if err != nil {
 		return nil
 	}

@@ -94,3 +94,39 @@ func firstLine(s string) string {
 	}
 	return s
 }
+
+func TestObjectTypeCode(t *testing.T) {
+	cases := map[string]string{
+		"CREATE OR REPLACE PACKAGE BODY uc_grid_util":         "b",
+		"create or replace package   body x":                  "b",
+		"CREATE OR REPLACE PACKAGE x":                         "9",
+		"CREATE OR REPLACE FUNCTION f":                        "8",
+		"CREATE OR REPLACE PROCEDURE p":                       "7",
+		"CREATE OR REPLACE TYPE t":                            "d",
+		"CREATE OR REPLACE TYPE BODY t":                       "e",
+		"CREATE OR REPLACE EDITIONABLE PACKAGE BODY type_pkg": "b",
+		"CREATE OR REPLACE FUNCTION package_name":             "8",
+		"something else":                                      "8",
+	}
+	for header, want := range cases {
+		if got := objectTypeCode(header); got != want {
+			t.Errorf("objectTypeCode(%q) = %q, want %q", header, got, want)
+		}
+	}
+}
+
+func TestSplitBase64AvoidsLeadingSlash(t *testing.T) {
+	in := strings.Repeat("A", 72) + "/" + strings.Repeat("B", 10) + "//" + strings.Repeat("C", 140) + "/"
+	lines := splitBase64(in, 72)
+	if strings.Join(lines, "") != in {
+		t.Fatalf("lines do not rejoin to the input")
+	}
+	for i, l := range lines {
+		if len(l) > 72 {
+			t.Errorf("line %d longer than 72: %d", i, len(l))
+		}
+		if i > 0 && strings.HasPrefix(l, "/") {
+			t.Errorf("line %d starts with '/': %q", i, l)
+		}
+	}
+}
