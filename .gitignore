@@ -5,3 +5,4 @@
 # Built CLI binary (if built into the repo root)
 /plsqlwrap-bin
 /bin/
+.DS_Store
