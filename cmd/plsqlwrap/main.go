@@ -9,7 +9,8 @@
 //	plsqlwrap deobfuscate [-i file] [-o file] [-p passphrase]
 //
 // Input is read from -i or, if omitted, stdin. Output is written to -o or, if
-// omitted, stdout.
+// omitted, stdout. Exception: wrap/obfuscate of "-i x.pkb" without -o writes
+// "x.pkw" next to the input; use "-o -" to force stdout.
 package main
 
 import (
@@ -17,6 +18,8 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
+	"strings"
 
 	"github.com/phartenfeller/plsql-unwrap-go/plsqlwrap"
 )
@@ -60,6 +63,14 @@ func main() {
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "Error:", err)
 		os.Exit(1)
+	}
+
+	// wrap/obfuscate: -i foo.pkb with no -o writes foo.pkw next to the input.
+	if *outPath == "" && (cmd == "wrap" || cmd == "obfuscate" || cmd == "obf") {
+		*outPath = defaultWrappedPath(*inPath)
+	}
+	if *outPath == "-" {
+		*outPath = ""
 	}
 
 	var result string
@@ -119,6 +130,15 @@ func unwrapAndDeobfuscate(input, passphrase string) (string, error) {
 	return plsqlwrap.Deobfuscate(unwrapped+"\n"+parts.Enc, passphrase)
 }
 
+// defaultWrappedPath maps "dir/name.pkb" to "dir/name.pkw". It returns "" (stdout)
+// when there is no input file or the extension is not .pkb.
+func defaultWrappedPath(in string) string {
+	if strings.EqualFold(filepath.Ext(in), ".pkb") {
+		return strings.TrimSuffix(in, filepath.Ext(in)) + ".pkw"
+	}
+	return ""
+}
+
 func readInput(path string) (string, error) {
 	if path != "" {
 		b, err := os.ReadFile(path)
@@ -149,5 +169,7 @@ Usage:
   plsqlwrap deobfuscate [-i file] [-o file] -p passphrase
 
 Reads stdin when -i is omitted; writes stdout when -o is omitted.
+wrap/obfuscate with -i x.pkb and no -o write x.pkw next to the input
+(use -o - for stdout).
 `)
 }
