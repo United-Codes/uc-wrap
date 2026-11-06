@@ -35,14 +35,22 @@ go build ./cmd/uc-wrap
 ## CLI
 
 ```
-uc-wrap wrap        [-i file] [-o file] [--keep-comments] [--compat]
-uc-wrap obfuscate   [-i file] [-o file] -p passphrase [--keep-comments]
+uc-wrap [wrap]      [-i file|glob...] [-o file] [--keep-comments] [--compat]
+uc-wrap obfuscate   [-i file|glob...] [-o file] -p passphrase [--keep-comments]
 uc-wrap deobfuscate [-i file] [-o file] -p passphrase
 ```
 
 - Reads **stdin** when `-i` is omitted; writes **stdout** when `-o` is omitted.
 - **Exception:** `wrap` and `obfuscate` with `-i name.pkb` and no `-o` write
   `name.pkw` next to the input. Use `-o -` to force stdout.
+- **Several files / globs:** `wrap` and `obfuscate` accept many inputs, e.g.
+  `-i ./*.pkb`. Each `.pkb` is written to its own `.pkw`. Your shell expands the
+  glob; a quoted pattern (`-i "src/*.pkb"`) is expanded by `uc-wrap` itself, which
+  also covers Windows `cmd`. `-o` can't be combined with several inputs, and every
+  input must be a `.pkb` file. A failing file doesn't stop the others; the exit
+  code is non-zero if any failed. Globs are not recursive (`*` matches within one
+  directory).
+- Without a subcommand, `wrap` is assumed (`uc-wrap -i ./*.pkb`).
 - `--keep-comments` keeps comments (default strips them, like Oracle's wrap).
 - `--compat` strips a `schema.` prefix from object names before wrapping
   (Oracle truncates names at the dot otherwise).
@@ -53,12 +61,21 @@ Examples:
 # Wrap a package body: writes my_pkg.pkw next to my_pkg.pkb (no -o needed)
 uc-wrap wrap -i my_pkg.pkb
 
+# Wrap every .pkb in the directory: each becomes <name>.pkw
+uc-wrap -i ./*.pkb
+
+# Same, quoted so uc-wrap expands the glob itself (also works on Windows cmd)
+uc-wrap wrap -i "src/*.pkb"
+
 # Same, with an explicit output file (required for non-.pkb inputs)
 uc-wrap wrap -i func.sql -o func.plb
 
 # Obfuscate (writes my_pkg.pkw), then restore
 uc-wrap obfuscate   -i my_pkg.pkb -p s3cret
 uc-wrap deobfuscate -i my_pkg.pkw -p s3cret
+
+# Obfuscate a whole directory
+uc-wrap obfuscate -i ./*.pkb -p s3cret
 ```
 
 ## What obfuscating does
@@ -67,10 +84,9 @@ uc-wrap deobfuscate -i my_pkg.pkw -p s3cret
 (that is how this tool's own `deobfuscate` works), and the unwrapped text still
 has your readable identifier names. `obfuscate` adds a layer on top:
 
-1. **Renames locally declared names** (variables, constants, exceptions, cursors
-   and local types) to meaningless identifiers, consistently across the unit.
-2. **Strips formatting** (and comments, unless `--keep-comments`), so the
-   structure is harder to read.
+1. **Renames private local names** (variables, constants, exceptions, cursors
+   and local types) to random identifiers, consistently across the unit.
+2. **Drops comments** (unless `--keep-comments`).
 3. **Wraps** the result in the usual V2 format, so it installs and runs in Oracle
    like any wrapped unit.
 4. **Appends an encrypted name map** (`--ENC:` block, AES-256-CBC with a key
@@ -78,18 +94,28 @@ has your readable identifier names. `obfuscate` adds a layer on top:
    names can't be recovered; with it, `deobfuscate` unwraps the unit and puts the
    names back.
 
-Only names that are provably private to the unit are renamed, so the obfuscated
-code compiles exactly like the original. Package-spec names, public subprograms,
-parameters and schema objects referenced in SQL (tables, columns, other
-packages) are never touched, because renaming them would break callers or
-queries. That means an unwrapped, obfuscated unit still reveals its public API
-and the SQL it runs, just not the names of its internals.
+**It does not make debugging harder.** Line breaks and indentation are kept, and
+every generated name has the same length as the original, so the line *and
+column* numbers in Oracle's error messages, `USER_ERRORS` and error backtraces
+for the obfuscated unit are the same as for your original source. Subprogram
+names still appear in call stacks and profiler output. Plain `wrap` keeps line
+numbers too (comments are blanked, not deleted).
+
+**It only renames what is provably safe**, so the unit behaves exactly like the
+original. Never touched: package-spec declarations, public and private
+subprogram names, parameters, record fields, schema objects, anything in a
+string literal, and any local whose name also appears in static SQL (a table
+column with the same name would win over the variable there, so renaming the
+variable could silently change the query), after a `.`, as a named argument,
+bind or `$$` directive. An unwrapped obfuscated unit therefore still reveals its
+public API, subprogram names and SQL, just not the names of most internal
+variables.
 
 Limits to be aware of:
 
-- `deobfuscate` restores the **names**, not the original formatting or
-  comments; it re-indents the code.
-- Obfuscate **one unit per file** (spec and body separately).
+- `deobfuscate` restores the code but not the comments (they are removed), and a
+  local written in several letter cases comes back in its first spelling.
+- Obfuscation is an extra obstacle, not encryption of the code itself.
 - The passphrase is the only secret. Keep it out of the repo and out of shell
   history where it matters. If it is lost, the names are unrecoverable.
 
