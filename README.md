@@ -41,6 +41,8 @@ uc-wrap deobfuscate [-i file] [-o file] -p passphrase
 ```
 
 - Reads **stdin** when `-i` is omitted; writes **stdout** when `-o` is omitted.
+- **Exception:** `wrap` and `obfuscate` with `-i name.pkb` and no `-o` write
+  `name.pkw` next to the input. Use `-o -` to force stdout.
 - `--keep-comments` keeps comments (default strips them, like Oracle's wrap).
 - `--compat` strips a `schema.` prefix from object names before wrapping
   (Oracle truncates names at the dot otherwise).
@@ -48,12 +50,15 @@ uc-wrap deobfuscate [-i file] [-o file] -p passphrase
 Examples:
 
 ```sh
-# Wrap (writes func.plb)
+# Wrap a package body: writes my_pkg.pkw next to my_pkg.pkb (no -o needed)
+uc-wrap wrap -i my_pkg.pkb
+
+# Same, with an explicit output file (required for non-.pkb inputs)
 uc-wrap wrap -i func.sql -o func.plb
 
-# Obfuscate then restore
-uc-wrap obfuscate   -i pkg.sql -p s3cret -o pkg.obf.sql
-uc-wrap deobfuscate -i pkg.obf.sql -p s3cret
+# Obfuscate (writes my_pkg.pkw), then restore
+uc-wrap obfuscate   -i my_pkg.pkb -p s3cret
+uc-wrap deobfuscate -i my_pkg.pkw -p s3cret
 ```
 
 ## Library
