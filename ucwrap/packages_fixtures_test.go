@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 )
@@ -19,7 +20,7 @@ import (
 //     between plain and wrapped installs instead of requiring a clean compile.
 //   - UCW_BIGGEN is generated in code (see genLargePackage). It spans hundreds
 //     of base64 lines, the stress case for the wrapper's terminator length.
-var packageFixtures = []string{
+var committedFixtures = []string{
 	"UCW_STRINGS",
 	"UCW_COLLECTIONS",
 	"UCW_CONDCOMP",
@@ -29,6 +30,20 @@ var packageFixtures = []string{
 	"EBA_DEMO_IR_PKG",
 	"UCW_BIGGEN",
 }
+
+// packageFixtures is the committed list plus any private fixtures found in the
+// git-ignored testdata/realworld/ directory (<OBJECT>.pkb, optional .pks).
+// Those hold proprietary package sources that must never be committed; the
+// tests simply skip them when the directory is absent (e.g. in CI).
+var packageFixtures = func() []string {
+	out := append([]string{}, committedFixtures...)
+	files, _ := filepath.Glob(filepath.Join("..", "testdata", "realworld", "*.pkb"))
+	sort.Strings(files)
+	for _, f := range files {
+		out = append(out, strings.TrimSuffix(filepath.Base(f), filepath.Ext(f)))
+	}
+	return out
+}()
 
 // loadFixture returns the spec (optional) and body source for an object. Any
 // trailing "/" terminator is stripped from the spec so callers can append
@@ -42,7 +57,10 @@ func loadFixture(t *testing.T, obj string) (specSQL, bodySrc string, ok bool) {
 	dir := filepath.Join("..", "testdata", "packages")
 	b, err := os.ReadFile(filepath.Join(dir, obj+".pkb"))
 	if err != nil {
-		return "", "", false
+		dir = filepath.Join("..", "testdata", "realworld")
+		if b, err = os.ReadFile(filepath.Join(dir, obj+".pkb")); err != nil {
+			return "", "", false
+		}
 	}
 	bodySrc = string(b)
 	if s, err := os.ReadFile(filepath.Join(dir, obj+".pks")); err == nil {

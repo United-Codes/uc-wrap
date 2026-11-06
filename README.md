@@ -61,6 +61,38 @@ uc-wrap obfuscate   -i my_pkg.pkb -p s3cret
 uc-wrap deobfuscate -i my_pkg.pkw -p s3cret
 ```
 
+## What obfuscating does
+
+`wrap` alone is not strong protection: anyone can unwrap Oracle's V2 format
+(that is how this tool's own `deobfuscate` works), and the unwrapped text still
+has your readable identifier names. `obfuscate` adds a layer on top:
+
+1. **Renames locally declared names** (variables, constants, exceptions, cursors
+   and local types) to meaningless identifiers, consistently across the unit.
+2. **Strips formatting** (and comments, unless `--keep-comments`), so the
+   structure is harder to read.
+3. **Wraps** the result in the usual V2 format, so it installs and runs in Oracle
+   like any wrapped unit.
+4. **Appends an encrypted name map** (`--ENC:` block, AES-256-CBC with a key
+   derived from your passphrase via PBKDF2). Without the passphrase the original
+   names can't be recovered; with it, `deobfuscate` unwraps the unit and puts the
+   names back.
+
+Only names that are provably private to the unit are renamed, so the obfuscated
+code compiles exactly like the original. Package-spec names, public subprograms,
+parameters and schema objects referenced in SQL (tables, columns, other
+packages) are never touched, because renaming them would break callers or
+queries. That means an unwrapped, obfuscated unit still reveals its public API
+and the SQL it runs, just not the names of its internals.
+
+Limits to be aware of:
+
+- `deobfuscate` restores the **names**, not the original formatting or
+  comments; it re-indents the code.
+- Obfuscate **one unit per file** (spec and body separately).
+- The passphrase is the only secret. Keep it out of the repo and out of shell
+  history where it matters. If it is lost, the names are unrecoverable.
+
 ## Library
 
 ```go

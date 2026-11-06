@@ -6,3 +6,6 @@
 /uc-wrap-bin
 /bin/
 .DS_Store
+
+# Private real-world package fixtures (never commit; tests use them if present)
+/testdata/realworld/
