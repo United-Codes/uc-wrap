@@ -27,7 +27,7 @@ for algorithm questions and a cross-check oracle (its `unwrap`/`wrap` binary).
   - `reserved.go` — PL/SQL reserved words the obfuscator never renames.
 - `cmd/uc-wrap/main.go` — subcommand CLI (`wrap`/`obfuscate`/`deobfuscate`; there is deliberately no `unwrap` command, unwrapping is library-only and used internally by `deobfuscate`), stdin/`-i`, stdout/`-o`.
 - `testdata/` — committed golden fixtures (real `DBMS_DDL.WRAP` output);
-  `testdata/realworld/` holds sampled UC package spec+body pairs for the
+  `testdata/packages/` holds sample package spec+body pairs for the
   install-into-DB tests.
 
 ## V2 format (the essentials)
@@ -106,21 +106,24 @@ second `CREATE`; obfuscate one unit per file.
   These prove Go unwraps real `DBMS_DDL.WRAP` output and Go-wrapped/obfuscated
   objects install and run. DB tests live in `db_integration_test.go` behind the
   `//go:build dbtest` tag.
-- `realworld_db_test.go` (same tag) wraps/obfuscates a sample of genuine UC
-  package bodies committed under `testdata/realworld/<OBJECT>.{pks,pkb}` (11
-  units, incl. `UC_GUIDEDTOUR`; `APE_DICTIONARY_VIEWS` at ~1670 base64 lines —
-  the terminator stress case; and conditional-compilation-heavy units like
-  `AOP_API25_PKG` / `APE_JSON_DOC` with `$IF/$THEN/$END`, plus local-type-heavy
-  `UC_CRYPTO` — these stress the obfuscator's block scanner, and the live DB
-  confirms `$END` mis-tokenization never causes unsafe over-collection) and
-  installs them. The wrap test asserts the wrapped body's `USER_ERRORS`
-  are byte-identical to the plain normalized source's (transparent wrap) and that
-  nothing is rejected as malformed. The obfuscate test asserts Oracle accepts the
-  unit (no malformed) **and the obfuscated body's error texts equal the plain
-  source's** (the safe obfuscator introduces no new errors — it compiles
-  equivalently), then unwrap+deobfuscate restores every renamed local. Errors
-  are compared dependency-robustly: these packages reference objects absent in
-  the test schema, but those errors appear equally on both sides.
+- `packages_fixtures_test.go` defines the sample packages (`packageFixtures`):
+  hand-written `UCW_*` packages under `testdata/packages/<OBJECT>.{pks,pkb}`
+  (conditional compilation, local record/collection types, cursors, labels/goto,
+  dynamic SQL, string literals containing comment markers; they compile cleanly
+  against `DUAL` only), two packages from Oracle's APEX sample apps (`EBA_CUST_FW`,
+  `EBA_DEMO_IR_PKG`), and `UCW_BIGGEN`, generated in code with 400 functions
+  (~260 base64 lines) as the terminator stress case. Do **not** commit
+  proprietary/customer package sources here.
+- `packages_test.go` (hermetic) round-trips wrap and obfuscate for every fixture
+  and pins the block scanner's renamable-locals on known packages.
+- `packages_db_test.go` (`dbtest` tag) installs each fixture. The wrap test
+  asserts the wrapped body's `USER_ERRORS` are byte-identical to the plain
+  normalized source's (transparent wrap) and that nothing is rejected as
+  malformed. The obfuscate test asserts Oracle accepts the unit **and the
+  obfuscated body's error texts equal the plain source's** (the safe obfuscator
+  introduces no new errors), then unwrap+deobfuscate restores every renamed
+  local. Errors are compared dependency-robustly: the `EBA_*` packages reference
+  objects absent in the test schema, but those errors appear equally on both sides.
 
 To regenerate a golden fixture: `SELECT DBMS_DDL.WRAP('CREATE OR REPLACE ...')
 FROM dual` via SQLcl and save the wrapped text to `testdata/`.

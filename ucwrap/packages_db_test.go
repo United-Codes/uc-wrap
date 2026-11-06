@@ -1,73 +1,21 @@
 //go:build dbtest
 
-// Real-world DB integration tests. Run with:
+// Package DB integration tests. Run with:
 //
-//	go test -tags dbtest -run RealWorld ./ucwrap
+//	go test -tags dbtest -run Packages ./ucwrap
 //
-// These exercise wrap + obfuscate against a sample of genuine UC PL/SQL package
-// bodies (including the explicitly requested guided-tour package) and install
-// each into a live Oracle instance via SQLcl. They share the runSQL/sqlConn
-// helpers with db_integration_test.go.
-//
-// The spec/body source files are committed under testdata/realworld/ as
-// <OBJECT>.pks / <OBJECT>.pkb, so the suite is self-contained (no dependency on
-// an external checkout).
+// These exercise wrap + obfuscate against the sample packages defined in
+// packages_fixtures_test.go (committed under testdata/packages/ plus a
+// generated large unit) and install each into a live Oracle instance via
+// SQLcl. They share the runSQL/sqlConn helpers with db_integration_test.go.
 package ucwrap
 
 import (
-	"os"
-	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
 	"testing"
 )
-
-// realWorldFixtures are the sampled package bodies, committed under
-// testdata/realworld/. UC_GUIDEDTOUR was requested explicitly; the rest are a
-// spread of sizes (≈370 → ≈6800 lines) picked across different products to
-// stress the wrapper — in particular the terminator length field, which only
-// misbehaves on units spanning many base64 lines.
-var realWorldFixtures = []string{
-	"UC_GUIDEDTOUR",
-	"UC_IMAGEEDIT",
-	"AOE_PLUGIN",
-	"APE_UTILS",
-	"AIW_CLAIM_API",
-	// Larger / trickier units added to stress the wrapper and the obfuscator's
-	// block-structure scanner:
-	//   APE_DICTIONARY_VIEWS — ~11k lines / ~1500 base64 lines, the biggest unit.
-	//   AOP_API25_PKG        — heavy PL/SQL conditional compilation ($IF/$THEN/$END).
-	//   UC_GRID              — local RECORD/collection types + conditional compilation.
-	//   UC_CRYPTO            — many locally-declared types (RECORD/TABLE OF).
-	//   APE_JSON_DOC         — conditional compilation + BULK COLLECT.
-	//   UC_APEX_CHAT         — mixed: types, pragmas, bulk, conditional compilation.
-	"APE_DICTIONARY_VIEWS",
-	"AOP_API25_PKG",
-	"UC_GRID",
-	"UC_CRYPTO",
-	"APE_JSON_DOC",
-	"UC_APEX_CHAT",
-}
-
-// loadFixture reads the spec (optional) and body source for an object from
-// testdata/realworld/. ok is false when the .pkb is missing. Any trailing "/"
-// terminator is stripped from the spec so the caller can append its own.
-func loadFixture(t *testing.T, obj string) (specSQL, bodySrc string, ok bool) {
-	t.Helper()
-	dir := filepath.Join("..", "testdata", "realworld")
-	b, err := os.ReadFile(filepath.Join(dir, obj+".pkb"))
-	if err != nil {
-		return "", "", false
-	}
-	bodySrc = string(b)
-	if s, err := os.ReadFile(filepath.Join(dir, obj+".pks")); err == nil {
-		spec := strings.TrimRight(string(s), " \t\r\n")
-		spec = strings.TrimRight(spec, "/")
-		specSQL = strings.TrimRight(spec, " \t\r\n")
-	}
-	return specSQL, bodySrc, true
-}
 
 // installResult captures what an install produced for one package body.
 type installResult struct {
@@ -150,20 +98,20 @@ func errTexts(errs []string) []string {
 	return out
 }
 
-// TestRealWorldWrapMatchesPlain proves Go-wrapped real package bodies install
+// TestPackagesWrapMatchesPlain proves Go-wrapped real package bodies install
 // into Oracle and behave identically to their plain (un-wrapped) normalized
 // source: Oracle never rejects the wrapped unit as malformed/corrupted, and the
 // set of compile errors is byte-identical between the plain and wrapped install.
 // Identical errors ⇒ wrapping is transparent to the compiler, independent of
 // whatever external dependencies these packages happen to be missing in the
 // test schema.
-func TestRealWorldWrapMatchesPlain(t *testing.T) {
-	for _, obj := range realWorldFixtures {
+func TestPackagesWrapMatchesPlain(t *testing.T) {
+	for _, obj := range packageFixtures {
 		obj := obj
 		t.Run(obj, func(t *testing.T) {
 			specSQL, bodySrc, ok := loadFixture(t, obj)
 			if !ok {
-				t.Skipf("fixture not present: testdata/realworld/%s.pkb", obj)
+				t.Skipf("fixture not present: testdata/packages/%s.pkb", obj)
 			}
 			t.Cleanup(func() { runSQL(t, "DROP PACKAGE "+obj+";\n") })
 
@@ -194,7 +142,7 @@ func TestRealWorldWrapMatchesPlain(t *testing.T) {
 	}
 }
 
-// TestRealWorldObfuscateInstalls proves the obfuscate→wrap→install pipeline
+// TestPackagesObfuscateInstalls proves the obfuscate→wrap→install pipeline
 // compiles equivalently to the original: Oracle accepts the wrapped unit (no
 // malformed/corrupted error, object created) AND the obfuscated body produces
 // the SAME set of compile-error messages as the plain normalized source. Since
@@ -202,14 +150,14 @@ func TestRealWorldWrapMatchesPlain(t *testing.T) {
 // new errors — the only errors are the same missing-dependency ones the plain
 // body has in this schema (often none). It also checks the pipeline is
 // reversible: unwrap+deobfuscate restores the original identifier names.
-func TestRealWorldObfuscateInstalls(t *testing.T) {
+func TestPackagesObfuscateInstalls(t *testing.T) {
 	const pw = "real-world-pass-123"
-	for _, obj := range realWorldFixtures {
+	for _, obj := range packageFixtures {
 		obj := obj
 		t.Run(obj, func(t *testing.T) {
 			specSQL, bodySrc, ok := loadFixture(t, obj)
 			if !ok {
-				t.Skipf("fixture not present: testdata/realworld/%s.pkb", obj)
+				t.Skipf("fixture not present: testdata/packages/%s.pkb", obj)
 			}
 			t.Cleanup(func() { runSQL(t, "DROP PACKAGE "+obj+";\n") })
 
