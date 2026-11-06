@@ -1,4 +1,4 @@
-module github.com/phartenfeller/plsql-unwrap-go
+module github.com/United-Codes/uc-wrap
 
 go 1.26.4
 

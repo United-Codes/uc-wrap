@@ -26,11 +26,11 @@ jobs:
           mkdir -p dist
           for os in linux darwin windows; do
             for arch in amd64 arm64; do
-              output="dist/plsqlwrap_${os}_${arch}"
+              output="dist/uc-wrap_${os}_${arch}"
               if [ "$os" = windows ]; then
                 output="${output}.exe"
               fi
-              GOOS="$os" GOARCH="$arch" go build -trimpath -ldflags='-s -w' -o "$output" ./cmd/plsqlwrap
+              GOOS="$os" GOARCH="$arch" go build -trimpath -ldflags='-s -w' -o "$output" ./cmd/uc-wrap
             done
           done
       - name: Attach binaries to release

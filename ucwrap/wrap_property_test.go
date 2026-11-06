@@ -1,4 +1,4 @@
-package plsqlwrap
+package ucwrap
 
 import (
 	"encoding/base64"

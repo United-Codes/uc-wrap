@@ -1,4 +1,4 @@
-package plsqlwrap
+package ucwrap
 
 import "testing"
 

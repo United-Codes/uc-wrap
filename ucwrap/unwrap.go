@@ -1,4 +1,4 @@
-package plsqlwrap
+package ucwrap
 
 import (
 	"bytes"
@@ -11,11 +11,11 @@ import (
 
 // ErrNotWrapped is returned by UnwrapV2 when the input does not contain a
 // recognizable V2 wrapped section.
-var ErrNotWrapped = errors.New("plsqlwrap: input is not V2-wrapped (no \"wrapped a000000\" marker)")
+var ErrNotWrapped = errors.New("ucwrap: input is not V2-wrapped (no \"wrapped a000000\" marker)")
 
 // ErrCorruptData is returned when the wrapped payload cannot be decoded or
 // decompressed (truncated base64, bad zlib stream, etc.).
-var ErrCorruptData = errors.New("plsqlwrap: corrupt or invalid V2 wrapped data")
+var ErrCorruptData = errors.New("ucwrap: corrupt or invalid V2 wrapped data")
 
 // isHexLine reports whether line is the V2 terminator: two space-separated
 // hexadecimal tokens (e.g. "2b 60"). Trailing CR/space/tab are ignored.

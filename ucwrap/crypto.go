@@ -1,4 +1,4 @@
-package plsqlwrap
+package ucwrap
 
 import (
 	"crypto/aes"
@@ -52,14 +52,14 @@ func aesEncrypt(plaintext []byte, passphrase string) ([]byte, error) {
 // invalid-padding error.
 func aesDecrypt(blob []byte, passphrase string) ([]byte, error) {
 	if len(blob) < saltLen+ivLen+aes.BlockSize {
-		return nil, errors.New("plsqlwrap: encrypted blob too short")
+		return nil, errors.New("ucwrap: encrypted blob too short")
 	}
 	salt := blob[:saltLen]
 	iv := blob[saltLen : saltLen+ivLen]
 	ciphertext := blob[saltLen+ivLen:]
 
 	if len(ciphertext)%aes.BlockSize != 0 {
-		return nil, errors.New("plsqlwrap: ciphertext is not a multiple of the block size")
+		return nil, errors.New("ucwrap: ciphertext is not a multiple of the block size")
 	}
 
 	key := pbkdf2.Key([]byte(passphrase), salt, pbkdf2Iterations, keyLen, sha256.New)
@@ -85,15 +85,15 @@ func pkcs7Pad(data []byte, blockSize int) []byte {
 
 func pkcs7Unpad(data []byte, blockSize int) ([]byte, error) {
 	if len(data) == 0 || len(data)%blockSize != 0 {
-		return nil, errors.New("plsqlwrap: invalid PKCS7 padding (length)")
+		return nil, errors.New("ucwrap: invalid PKCS7 padding (length)")
 	}
 	pad := int(data[len(data)-1])
 	if pad == 0 || pad > blockSize || pad > len(data) {
-		return nil, errors.New("plsqlwrap: invalid PKCS7 padding (size)")
+		return nil, errors.New("ucwrap: invalid PKCS7 padding (size)")
 	}
 	for _, b := range data[len(data)-pad:] {
 		if int(b) != pad {
-			return nil, errors.New("plsqlwrap: invalid PKCS7 padding (bytes)")
+			return nil, errors.New("ucwrap: invalid PKCS7 padding (bytes)")
 		}
 	}
 	return data[:len(data)-pad], nil

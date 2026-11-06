@@ -4,6 +4,8 @@ Guidance for AI coding agents working in this repo.
 
 ## What this is
 
+(Hosted at github.com/United-Codes/uc-wrap, a fork of github.com/zx97/unwrap. Go package: `ucwrap`, CLI: `uc-wrap`.)
+
 A Go library + CLI that **wraps / unwraps / obfuscates / deobfuscates** Oracle
 PL/SQL source in the **V2 format** (Oracle 10g → 23ai/26ai), i.e. the encoding
 produced by Oracle's `wrap` utility and `DBMS_DDL.WRAP`.
@@ -15,7 +17,7 @@ for algorithm questions and a cross-check oracle (its `unwrap`/`wrap` binary).
 
 ## Layout
 
-- `plsqlwrap/` — the library (no external deps except `golang.org/x/crypto/pbkdf2`).
+- `ucwrap/` — the library (no external deps except `golang.org/x/crypto/pbkdf2`).
   - `cipher.go` — the 256-byte substitution table `cipherFrom` + computed inverse `cipherTo`.
   - `unwrap.go` — `UnwrapV2`; base64 (lenient) + cipher + zlib inflate.
   - `wrap.go` — `WrapV2`; comment strip, header extract, uppercase-preserving-strings, zlib deflate + SHA-1 + cipher + base64 + preamble.
@@ -23,7 +25,7 @@ for algorithm questions and a cross-check oracle (its `unwrap`/`wrap` binary).
   - `obfuscate.go` — `Obfuscate`/`Deobfuscate`, identifier rename, `SplitEnc`, `WrapObfuscated`.
   - `crypto.go` — AES-256-CBC + PBKDF2-HMAC-SHA256 (100k iters) + PKCS7; wire format `salt(16)||IV(16)||ciphertext`.
   - `reserved.go` — PL/SQL reserved words the obfuscator never renames.
-- `cmd/plsqlwrap/main.go` — subcommand CLI (`wrap`/`unwrap`/`obfuscate`/`deobfuscate`), stdin/`-i`, stdout/`-o`.
+- `cmd/uc-wrap/main.go` — subcommand CLI (`wrap`/`obfuscate`/`deobfuscate`; there is deliberately no `unwrap` command, unwrapping is library-only and used internally by `deobfuscate`), stdin/`-i`, stdout/`-o`.
 - `testdata/` — committed golden fixtures (real `DBMS_DDL.WRAP` output);
   `testdata/realworld/` holds sampled UC package spec+body pairs for the
   install-into-DB tests.
@@ -99,8 +101,8 @@ second `CREATE`; obfuscate one unit per file.
 ## Tests
 
 - `go test ./...` — hermetic (unit, round-trip, golden fixtures). Keep these green and DB-free.
-- `go test -tags dbtest ./plsqlwrap` — shells out to SQLcl (`sql`) against the
-  connection `local-23ai-uc_testinstall_1` (override with `PLSQLWRAP_SQL_CONN`).
+- `go test -tags dbtest ./ucwrap` — shells out to SQLcl (`sql`) against the
+  connection `local-23ai-uc_testinstall_1` (override with `UCWRAP_SQL_CONN`).
   These prove Go unwraps real `DBMS_DDL.WRAP` output and Go-wrapped/obfuscated
   objects install and run. DB tests live in `db_integration_test.go` behind the
   `//go:build dbtest` tag.

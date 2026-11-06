@@ -3,6 +3,6 @@
 *.out
 
 # Built CLI binary (if built into the repo root)
-/plsqlwrap-bin
+/uc-wrap-bin
 /bin/
 .DS_Store

@@ -2,12 +2,12 @@
 
 // Package-level DB integration tests. Run with:
 //
-//	go test -tags dbtest ./plsqlwrap
+//	go test -tags dbtest ./ucwrap
 //
 // They shell out to SQLcl against a live Oracle instance. The connection name
 // defaults to "local-23ai-uc_testinstall_1" and can be overridden with the
-// PLSQLWRAP_SQL_CONN environment variable.
-package plsqlwrap
+// UCWRAP_SQL_CONN environment variable.
+package ucwrap
 
 import (
 	"bytes"
@@ -19,7 +19,7 @@ import (
 )
 
 func sqlConn() string {
-	if c := os.Getenv("PLSQLWRAP_SQL_CONN"); c != "" {
+	if c := os.Getenv("UCWRAP_SQL_CONN"); c != "" {
 		return c
 	}
 	return "local-23ai-uc_testinstall_1"

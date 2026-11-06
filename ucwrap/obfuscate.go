@@ -1,4 +1,4 @@
-package plsqlwrap
+package ucwrap
 
 import (
 	"encoding/base64"
@@ -9,11 +9,11 @@ import (
 
 // ErrNoEncData is returned by Deobfuscate when the source has no embedded
 // "--ENC:" obfuscation block.
-var ErrNoEncData = errors.New("plsqlwrap: no --ENC: obfuscation data found")
+var ErrNoEncData = errors.New("ucwrap: no --ENC: obfuscation data found")
 
 // ErrDecrypt is returned when the embedded mapping cannot be decrypted (most
 // commonly a wrong passphrase).
-var ErrDecrypt = errors.New("plsqlwrap: decryption failed (wrong passphrase?)")
+var ErrDecrypt = errors.New("ucwrap: decryption failed (wrong passphrase?)")
 
 // Obfuscate renames local identifiers to very short names, strips comments
 // (unless keepComments is set) and formatting, and appends an AES-256-CBC

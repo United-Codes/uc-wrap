@@ -2,7 +2,7 @@
 
 // Real-world DB integration tests. Run with:
 //
-//	go test -tags dbtest -run RealWorld ./plsqlwrap
+//	go test -tags dbtest -run RealWorld ./ucwrap
 //
 // These exercise wrap + obfuscate against a sample of genuine UC PL/SQL package
 // bodies (including the explicitly requested guided-tour package) and install
@@ -12,7 +12,7 @@
 // The spec/body source files are committed under testdata/realworld/ as
 // <OBJECT>.pks / <OBJECT>.pkb, so the suite is self-contained (no dependency on
 // an external checkout).
-package plsqlwrap
+package ucwrap
 
 import (
 	"os"

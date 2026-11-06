@@ -1,11 +1,11 @@
-// Package plsqlwrap wraps and unwraps Oracle PL/SQL source code using the
+// Package ucwrap wraps and unwraps Oracle PL/SQL source code using the
 // "V2" format (Oracle 10g and later, through 23ai/26ai) — the same encoding
 // produced by Oracle's native wrap utility / DBMS_DDL.WRAP.
 //
 // It is a Go port of the C++ "PL/SQL Unwrap" tool by Manuel FLURY, itself a
 // port of Cameron Marshall's PL/SQL Unwrapper. The legacy V1 (Oracle 8/8i/9i)
 // path is intentionally not ported.
-package plsqlwrap
+package ucwrap
 
 // cipherFrom is the 256-byte substitution table used by the V2 format. It is a
 // permutation of all byte values 0x00..0xFF.

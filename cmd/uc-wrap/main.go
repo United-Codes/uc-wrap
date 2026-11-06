@@ -1,12 +1,11 @@
-// Command plsqlwrap wraps, unwraps, obfuscates and deobfuscates Oracle PL/SQL
+// Command uc-wrap wraps, obfuscates and deobfuscates Oracle PL/SQL
 // source using the V2 (Oracle 10g+ / current) format.
 //
 // Usage:
 //
-//	plsqlwrap unwrap      [-i file] [-o file]
-//	plsqlwrap wrap        [-i file] [-o file] [--keep-comments] [--compat]
-//	plsqlwrap obfuscate   [-i file] [-o file] [-p passphrase] [--keep-comments]
-//	plsqlwrap deobfuscate [-i file] [-o file] [-p passphrase]
+//	uc-wrap wrap        [-i file] [-o file] [--keep-comments] [--compat]
+//	uc-wrap obfuscate   [-i file] [-o file] [-p passphrase] [--keep-comments]
+//	uc-wrap deobfuscate [-i file] [-o file] [-p passphrase]
 //
 // Input is read from -i or, if omitted, stdin. Output is written to -o or, if
 // omitted, stdout. Exception: wrap/obfuscate of "-i x.pkb" without -o writes
@@ -21,7 +20,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/phartenfeller/plsql-unwrap-go/plsqlwrap"
+	"github.com/United-Codes/uc-wrap/ucwrap"
 )
 
 const version = "0.1.0 (Go port)"
@@ -38,7 +37,7 @@ func main() {
 		usage()
 		return
 	case "-V", "--version", "version":
-		fmt.Println("plsqlwrap", version)
+		fmt.Println("uc-wrap", version)
 		return
 	}
 
@@ -75,14 +74,12 @@ func main() {
 
 	var result string
 	switch cmd {
-	case "unwrap":
-		result = plsqlwrap.UnwrapAll(input)
 	case "wrap":
 		src := input
 		if *compat {
-			src = plsqlwrap.ApplyCompat(src)
+			src = ucwrap.ApplyCompat(src)
 		}
-		result = plsqlwrap.WrapV2(src, *keepComments, false)
+		result = ucwrap.WrapV2(src, *keepComments, false)
 	case "obfuscate", "obf":
 		if *passphrase == "" {
 			fmt.Fprintln(os.Stderr, "Error: -p passphrase is required for obfuscate")
@@ -117,17 +114,17 @@ func main() {
 // obfuscateAndWrap obfuscates the source, then wraps each CREATE unit before
 // the trailing --ENC: block (mirroring the reference CLI orchestration).
 func obfuscateAndWrap(input, passphrase string, keepComments bool) (string, error) {
-	obf, err := plsqlwrap.Obfuscate(input, passphrase, keepComments)
+	obf, err := ucwrap.Obfuscate(input, passphrase, keepComments)
 	if err != nil {
 		return "", err
 	}
-	return plsqlwrap.WrapObfuscated(obf, keepComments), nil
+	return ucwrap.WrapObfuscated(obf, keepComments), nil
 }
 
 func unwrapAndDeobfuscate(input, passphrase string) (string, error) {
-	parts := plsqlwrap.SplitEnc(input)
-	unwrapped := plsqlwrap.UnwrapAll(parts.Body)
-	return plsqlwrap.Deobfuscate(unwrapped+"\n"+parts.Enc, passphrase)
+	parts := ucwrap.SplitEnc(input)
+	unwrapped := ucwrap.UnwrapAll(parts.Body)
+	return ucwrap.Deobfuscate(unwrapped+"\n"+parts.Enc, passphrase)
 }
 
 // defaultWrappedPath maps "dir/name.pkb" to "dir/name.pkw". It returns "" (stdout)
@@ -160,13 +157,12 @@ func writeOutput(path, content string) error {
 }
 
 func usage() {
-	fmt.Fprint(os.Stderr, `plsqlwrap `+version+` — wrap/unwrap Oracle PL/SQL (V2 format)
+	fmt.Fprint(os.Stderr, `uc-wrap `+version+` — wrap Oracle PL/SQL (V2 format)
 
 Usage:
-  plsqlwrap unwrap      [-i file] [-o file]
-  plsqlwrap wrap        [-i file] [-o file] [--keep-comments] [--compat]
-  plsqlwrap obfuscate   [-i file] [-o file] -p passphrase [--keep-comments]
-  plsqlwrap deobfuscate [-i file] [-o file] -p passphrase
+  uc-wrap wrap        [-i file] [-o file] [--keep-comments] [--compat]
+  uc-wrap obfuscate   [-i file] [-o file] -p passphrase [--keep-comments]
+  uc-wrap deobfuscate [-i file] [-o file] -p passphrase
 
 Reads stdin when -i is omitted; writes stdout when -o is omitted.
 wrap/obfuscate with -i x.pkb and no -o write x.pkw next to the input
