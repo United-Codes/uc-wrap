@@ -25,7 +25,7 @@ for algorithm questions and a cross-check oracle (its `unwrap`/`wrap` binary).
   - `obfuscate.go` — `Obfuscate`/`Deobfuscate`, identifier rename, `SplitEnc`, `WrapObfuscated`.
   - `crypto.go` — AES-256-CBC + PBKDF2-HMAC-SHA256 (100k iters) + PKCS7; wire format `salt(16)||IV(16)||ciphertext`.
   - `reserved.go` — PL/SQL reserved words the obfuscator never renames.
-- `cmd/uc-wrap/main.go` — subcommand CLI (`wrap`/`obfuscate`/`deobfuscate`; there is deliberately no `unwrap` command, unwrapping is library-only and used internally by `deobfuscate`), stdin/`-i`, stdout/`-o`.
+- `cmd/uc-wrap/main.go` — subcommand CLI (`wrap`/`obfuscate`/`deobfuscate`; there is deliberately no `unwrap` command, unwrapping is library-only and used internally by `deobfuscate`), stdin/`-i`, stdout/`-o`; `wrap`/`obfuscate` accept several inputs or a glob (`-i ./*.pkb`, shell- or self-expanded) and write each `.pkb` to `.pkw` (`runBatch`); no subcommand means `wrap`.
 - `testdata/` — committed golden fixtures (real `DBMS_DDL.WRAP` output);
   `testdata/packages/` holds sample package spec+body pairs for the
   install-into-DB tests.
@@ -67,9 +67,16 @@ the SHA-1 is over our own compressed bytes, so Oracle installs/runs it. Don't
 write tests asserting byte-equality with Oracle's wrap; assert functional
 behavior instead. Unwrapping genuine Oracle output IS exact.
 
-Obfuscate→Deobfuscate restores identifier **names** but not original formatting
-(the obfuscator strips formatting; deobfuscate re-indents). Tests assert names,
-not exact layout.
+Obfuscate preserves **layout**: every line break and the indentation stay, `/* */`
+comments are blanked to spaces (keeping their newlines) and `--` comments are
+cut at the line break, and generated names are the **same length** as the
+originals. So Oracle's error/backtrace line *and column* numbers for an
+obfuscated+wrapped unit match the original file. Deobfuscate therefore restores
+the comment-stripped source exactly (modulo identifier case: a local written in
+several cases comes back in its first spelling). Plain wrap keeps line numbers
+too (`stripComments` blanks block comments instead of deleting them). Don't add
+anything that moves lines (dead code, line joining) — that would make
+production debugging harder; this is a hard requirement.
 
 ## Obfuscator: rename only what's provably safe
 
@@ -84,6 +91,17 @@ declarative frame only — so schema objects in embedded SQL, public subprogram
 names, parameters, and package-spec names are **never** renamed. Over-collection
 is the only unsafe direction, so the scanner declines when unsure.
 
+`renamableLocals` = `collectRenamableLocals` minus `collectUnsafeNames`
+(`safety.go`). A declared local is **not** renamed if its spelling could also
+mean something else: a member after `.` (`rec.status`, `pkg.g_cache`), a bind
+`:x` / inquiry directive `$$x`, a named argument `x =>`, a procedure / function /
+cursor parameter or record field name, a quoted identifier, or **any occurrence
+in static SQL except an INTO target** (in SQL a column named like the variable
+wins over it, so renaming the variable silently changes the statement; without
+the schema we can't rule that out). Package **spec** declarations are public API
+and are never collected. Declining is always the safe direction. Behavioural
+proof lives in `TestPackagesObfuscatedBehaviourMatchesPlain` (DB).
+
 `replaceIdentifiers` renames case-insensitively (mapping keyed by UPPER name) and
 renames the **base** of a qualified reference but never a member after `.`
 (`rec.field` → base renamed, `field` kept). The `..` range operator is special-
@@ -92,11 +110,17 @@ cased so `1..coll.count` doesn't treat `coll` as a member (that bug caused
 dotted chain verbatim" shortcut — it leaves the base unrenamed and breaks
 consistency for local records/collections.
 
+All scanners share `lexemeEnd` (`lex.go`) for strings, `q'[...]'` / `nq'...'`
+alternative quoting, quoted identifiers and comments — don't hand-roll quote
+handling again (it broke on `q'[it's]'`). Generated names are random
+(crypto/rand), same length as the original, start with a letter and contain a
+digit or `_` (never a keyword), and avoid every identifier in the source.
+
 This is a deliberate divergence from the C++ reference, whose obfuscator renames
 by a protect-list and corrupts embedded SQL / public names (it does not reliably
-compile). Multi-unit obfuscation (spec+body in one file) is unsupported in both
-tools — `stripFormatting` joins all lines so `WrapObfuscated` can't find the
-second `CREATE`; obfuscate one unit per file.
+compile). A spec and body in one file now obfuscate together (layout is kept, so
+`WrapObfuscated` finds each `CREATE`); `TestPackagesObfuscateSpecAndBodyInOneFile`
+covers it.
 
 ## Tests
 

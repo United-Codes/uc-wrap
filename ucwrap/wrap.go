@@ -161,50 +161,45 @@ func objectTypeCode(header string) string {
 	return "8"
 }
 
-// stripComments removes -- single-line and /* */ multi-line comments, leaving
-// the contents of '...' string literals (including ” escapes) untouched.
-// Newlines that followed a -- comment are preserved.
+// stripComments removes comments while keeping the source's line structure, so
+// line numbers reported by Oracle for the wrapped unit match the original
+// file. String literals (including ” escapes and q'[...]' alternative
+// quoting) are left untouched.
+//
+//   - A -- comment is dropped up to (not including) its line break.
+//   - A /* */ comment is replaced by spaces, keeping every line break it
+//     contained, so neither the following line numbers nor the columns of code
+//     after it on the same line move, and adjacent tokens never fuse.
 func stripComments(s string) string {
 	var out strings.Builder
 	out.Grow(len(s))
-	i := 0
-	for i < len(s) {
-		switch {
-		case s[i] == '\'':
-			out.WriteByte(s[i])
-			i++
-			for i < len(s) {
-				out.WriteByte(s[i])
-				if s[i] == '\'' {
-					if i+1 < len(s) && s[i+1] == '\'' {
-						i++
-						out.WriteByte(s[i])
+	for i := 0; i < len(s); {
+		if end, kind := lexemeEnd(s, i); kind != 0 {
+			switch {
+			case kind != 'c':
+				out.WriteString(s[i:end])
+			case s[i] == '/':
+				for k := i; k < end; k++ {
+					if s[k] == '\n' || s[k] == '\r' {
+						out.WriteByte(s[k])
 					} else {
-						i++
-						break
+						out.WriteByte(' ')
 					}
 				}
-				i++
 			}
-		case s[i] == '-' && i+1 < len(s) && s[i+1] == '-':
-			i += 2
-			for i < len(s) && s[i] != '\n' && s[i] != '\r' {
-				i++
-			}
-		case s[i] == '/' && i+1 < len(s) && s[i+1] == '*':
-			i += 2
-			for i+1 < len(s) && !(s[i] == '*' && s[i+1] == '/') {
-				i++
-			}
-			if i+1 < len(s) {
-				i += 2
-			} else {
-				i++
-			}
-		default:
-			out.WriteByte(s[i])
-			i++
+			i = end
+			continue
 		}
+		if isIDStart(s[i]) {
+			st := i
+			for i < len(s) && isIDChar(s[i]) {
+				i++
+			}
+			out.WriteString(s[st:i])
+			continue
+		}
+		out.WriteByte(s[i])
+		i++
 	}
 	return out.String()
 }
@@ -260,20 +255,29 @@ func keywordAt(s string, i int, kw string) bool {
 	return after >= len(s) || s[after] == ' ' || s[after] == '\n'
 }
 
-// upperPreservingStrings uppercases everything except the contents of '...'
-// string literals. A single quote toggles literal mode (mirroring the
-// reference implementation, which does not special-case ” escapes here).
+// upperPreservingStrings uppercases everything except string literals
+// ('...', q'[...]') and quoted identifiers ("..."), whose case is significant.
 func upperPreservingStrings(s string) string {
 	b := []byte(s)
-	inString := false
-	for i := 0; i < len(b); i++ {
-		if b[i] == '\'' {
-			inString = !inString
+	for i := 0; i < len(b); {
+		if end, kind := lexemeEnd(s, i); kind != 0 {
+			if kind == 'c' {
+				for k := i; k < end; k++ {
+					b[k] = toUpperByte(b[k])
+				}
+			}
+			i = end
 			continue
 		}
-		if !inString {
-			b[i] = toUpperByte(b[i])
+		if isIDStart(s[i]) {
+			for i < len(b) && isIDChar(s[i]) {
+				b[i] = toUpperByte(b[i])
+				i++
+			}
+			continue
 		}
+		b[i] = toUpperByte(b[i])
+		i++
 	}
 	return string(b)
 }

@@ -54,7 +54,7 @@ func TestPackagesObfuscateRoundTrip(t *testing.T) {
 				t.Fatalf("Deobfuscate: %v", err)
 			}
 			up := strings.ToUpper(restored)
-			for name := range collectRenamableLocals(stripComments(body)) {
+			for name := range renamableLocals(stripComments(body)) {
 				if !strings.Contains(up, name) {
 					t.Errorf("local %q not restored", name)
 				}
@@ -82,7 +82,7 @@ func TestPackagesRenamableLocals(t *testing.T) {
 	}
 	for obj, c := range cases {
 		_, body, _ := loadFixture(t, obj)
-		got := collectRenamableLocals(stripComments(body))
+		got := renamableLocals(stripComments(body))
 		for _, n := range c.want {
 			if _, ok := got[n]; !ok {
 				t.Errorf("%s: expected local %s to be renamable; got %v", obj, n, got)
@@ -93,5 +93,48 @@ func TestPackagesRenamableLocals(t *testing.T) {
 				t.Errorf("%s: %s must never be renamed", obj, n)
 			}
 		}
+	}
+}
+
+// TestPackagesObfuscatePreservesLayout checks, for every sample package, that
+// the obfuscated body has exactly the same number of lines as the
+// comment-stripped source, each with the same code length (generated names
+// match the originals' length), so Oracle's error line/column numbers for the
+// wrapped unit equal those of the original file; and that Deobfuscate restores
+// the comment-stripped source (modulo identifier case). It also logs how many locals the
+// safety rules let through.
+func TestPackagesObfuscatePreservesLayout(t *testing.T) {
+	for _, obj := range packageFixtures {
+		obj := obj
+		t.Run(obj, func(t *testing.T) {
+			_, body, _ := loadFixture(t, obj)
+			clean := stripComments(body)
+			obf, err := Obfuscate(body, "pw", false)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got := strings.Split(strings.TrimRight(SplitEnc(obf).Body, "\n"), "\n")
+			want := strings.Split(strings.TrimRight(clean, "\n"), "\n")
+			if len(got) != len(want) {
+				t.Fatalf("line count %d, want %d", len(got), len(want))
+			}
+			for i := range want {
+				if len(strings.TrimRight(got[i], " \t\r")) != len(strings.TrimRight(want[i], " \t\r")) {
+					t.Fatalf("line %d changed length:\n got  %q\n want %q", i+1, got[i], want[i])
+				}
+			}
+			restored, err := Deobfuscate(obf, "pw")
+			if err != nil {
+				t.Fatal(err)
+			}
+			// Identifier matching is case-insensitive, so a local written in
+			// several cases comes back in its first spelling; compare ignoring case.
+			if !strings.EqualFold(strings.TrimRight(restored, "\r\n"), strings.TrimRight(clean, "\r\n")) {
+				t.Errorf("Deobfuscate did not restore the comment-stripped source")
+			}
+			raw := collectRenamableLocals(clean)
+			safe := renamableLocals(clean)
+			t.Logf("%s: %d lines; %d/%d declared locals renamable after safety rules", obj, len(want), len(safe), len(raw))
+		})
 	}
 }

@@ -1,8 +1,10 @@
 package ucwrap
 
 import (
+	"crypto/rand"
 	"encoding/base64"
 	"errors"
+	"math/big"
 	"sort"
 	"strings"
 )
@@ -15,22 +17,27 @@ var ErrNoEncData = errors.New("ucwrap: no --ENC: obfuscation data found")
 // commonly a wrong passphrase).
 var ErrDecrypt = errors.New("ucwrap: decryption failed (wrong passphrase?)")
 
-// Obfuscate renames local identifiers to very short names, strips comments
-// (unless keepComments is set) and formatting, and appends an AES-256-CBC
+// Obfuscate renames provably-local identifiers to random, same-length names,
+// strips comments (unless keepComments is set) and appends an AES-256-CBC
 // encrypted name mapping as a trailing "--ENC:" block. The result can be
 // recovered with Deobfuscate and the same passphrase.
 //
-// Object names (on CREATE lines), all package-spec identifiers, and
-// procedure/function parameter names are protected from renaming.
+// Line breaks and indentation are preserved, and generated names have the same
+// length as the originals, so line and column numbers in compile errors, error
+// backtraces and call stacks of the wrapped unit match the original source.
+//
+// Object names (on CREATE lines), all package-spec identifiers, parameters,
+// record fields and every name that is not unambiguously a private local are
+// protected from renaming.
 func Obfuscate(source, passphrase string, keepComments bool) (string, error) {
 	clean := source
 	if !keepComments {
 		clean = stripComments(source)
 	}
 
-	// Collision-avoidance set for generated short names, seeded with the global
+	// Collision-avoidance set for generated names, seeded with the global
 	// reserved words plus header / package-spec / parameter identifiers (so a
-	// generated short name can never shadow a public name) plus every identifier
+	// generated name can never shadow a public name) plus every identifier
 	// already present in the source (via allIDs below).
 	reserved := make(map[string]struct{}, len(reservedWords))
 	for w := range reservedWords {
@@ -41,22 +48,23 @@ func Obfuscate(source, passphrase string, keepComments bool) (string, error) {
 	protectParameters(clean, reserved)
 	allIDs := collectAllIdentifiers(clean)
 
-	// Only rename names we can prove are locally declared (variables, constants,
-	// exceptions, cursors, local types). Everything else — schema objects
-	// referenced in embedded SQL, public subprogram names, parameters,
-	// package-spec names — is left untouched so the obfuscated unit still
-	// compiles identically to the original.
-	locals := collectRenamableLocals(clean)
-	freq, orig := countLocalOccurrences(clean, locals)
-	mapping := makeMapping(freq, allIDs, reserved) // UPPER(name) -> short
+	// Only rename names we can prove are private locals whose spelling can
+	// never be interpreted any other way (see renamableLocals).
+	locals := renamableLocals(clean)
+	_, orig := countLocalOccurrences(clean, locals)
+	names := make([]string, 0, len(orig))
+	for up := range orig {
+		names = append(names, up)
+	}
+	sort.Strings(names)
+	mapping := makeMapping(names, allIDs, reserved) // UPPER(name) -> generated
 
 	obfuscated := clean
 	if len(mapping) > 0 {
 		obfuscated = replaceIdentifiers(clean, mapping)
 	}
-	obfuscated = stripFormatting(obfuscated)
 
-	// Reverse map: UPPER(short) -> original spelling. Identifier matching is
+	// Reverse map: UPPER(generated) -> original spelling. Identifier matching is
 	// case-insensitive, so a single uppercased key suffices.
 	reverse := make(map[string]string, len(mapping))
 	for up, short := range mapping {
@@ -89,9 +97,9 @@ func Obfuscate(source, passphrase string, keepComments bool) (string, error) {
 }
 
 // Deobfuscate restores original identifier names from an obfuscated source
-// using the embedded encrypted mapping and the given passphrase, then
-// re-indents the result. Formatting is not restored exactly — only identifier
-// names and a minimal BEGIN/END indentation are recovered.
+// using the embedded encrypted mapping and the given passphrase. Because
+// Obfuscate preserves layout, the result matches the original source except
+// that comments are gone.
 func Deobfuscate(source, passphrase string) (string, error) {
 	encStart := strings.LastIndex(source, "--ENC:\n")
 	if encStart < 0 {
@@ -124,7 +132,19 @@ func Deobfuscate(source, passphrase string) (string, error) {
 
 	body := strings.TrimRight(source[:encStart], "\n\r \t")
 	result := replaceIdentifiers(body, reverseMap)
-	return reindentPLSQL(result), nil
+	if looksCompacted(result) {
+		// Output of an older version that joined everything onto a few long
+		// lines: re-indent so it is readable.
+		return reindentPLSQL(result), nil
+	}
+	return result + "\n", nil
+}
+
+// looksCompacted reports whether src has so few line breaks that it is
+// evidently the single-line output of the legacy obfuscator.
+func looksCompacted(src string) bool {
+	lines := strings.Count(src, "\n") + 1
+	return len(src)/lines > 200
 }
 
 // EncParts holds an obfuscated source split into its plain/wrapped body and its
@@ -223,53 +243,20 @@ type tkn struct {
 func tokenizePLSQL(s string) []tkn {
 	var toks []tkn
 	for i := 0; i < len(s); {
+		if end, kind := lexemeEnd(s, i); kind != 0 {
+			if kind != 'c' {
+				toks = append(toks, tkn{kind: 'q', text: s[i:end]})
+			}
+			i = end
+			continue
+		}
 		c := s[i]
 		switch {
 		case c == ' ' || c == '\t' || c == '\n' || c == '\r':
 			i++
-		case c == '\'':
-			st := i
-			i++
-			for i < len(s) {
-				if s[i] == '\'' {
-					if i+1 < len(s) && s[i+1] == '\'' {
-						i += 2
-						continue
-					}
-					i++
-					break
-				}
-				i++
-			}
-			toks = append(toks, tkn{kind: 'q', text: s[st:i]})
-		case c == '-' && i+1 < len(s) && s[i+1] == '-':
-			i += 2
-			for i < len(s) && s[i] != '\n' && s[i] != '\r' {
-				i++
-			}
-		case c == '/' && i+1 < len(s) && s[i+1] == '*':
-			i += 2
-			for i+1 < len(s) && !(s[i] == '*' && s[i+1] == '/') {
-				i++
-			}
-			if i+1 < len(s) {
-				i += 2
-			}
-		case c == '"':
-			st := i
-			i++
-			for i < len(s) && s[i] != '"' {
-				i++
-			}
-			if i < len(s) {
-				i++
-			}
-			toks = append(toks, tkn{kind: 'q', text: s[st:i]})
 		case isDigit(c):
 			st := i
-			for i < len(s) && (isIDChar(s[i]) || s[i] == '.') {
-				i++
-			}
+			i = numberEnd(s, i)
 			toks = append(toks, tkn{kind: 'n', text: s[st:i]})
 		case isIDStart(c):
 			st := i
@@ -305,9 +292,13 @@ func collectRenamableLocals(s string) map[string]struct{} {
 	toks := tokenizePLSQL(s)
 	locals := make(map[string]struct{})
 
-	type frame struct{ inDecl bool }
+	// noCollect marks a package SPEC frame: everything declared in a spec is
+	// public API, so it must never be renamed.
+	type frame struct{ inDecl, noCollect bool }
 	var frames []frame
 	inDecl := func() bool { return len(frames) > 0 && frames[len(frames)-1].inDecl }
+	canCollect := func() bool { return inDecl() && !frames[len(frames)-1].noCollect }
+	pendingSpec := false // the open PACKAGE header is a spec (not a body)
 
 	expectIS := false   // a PACKAGE/PROCEDURE/FUNCTION header is open; next top-level IS/AS opens a decl frame
 	atStmtStart := true // are we at the first token of a declaration item?
@@ -346,13 +337,15 @@ func collectRenamableLocals(s string) map[string]struct{} {
 		case "PACKAGE", "PROCEDURE", "FUNCTION":
 			expectIS = true
 			atStmtStart = false
+			pendingSpec = t.up == "PACKAGE" && !(j+1 < len(toks) && toks[j+1].kind == 'i' && toks[j+1].up == "BODY")
 		case "DECLARE":
 			frames = append(frames, frame{inDecl: true})
 			atStmtStart = true
 		case "IS", "AS":
 			if expectIS && parenDepth == 0 {
-				frames = append(frames, frame{inDecl: true})
+				frames = append(frames, frame{inDecl: true, noCollect: pendingSpec})
 				expectIS = false
+				pendingSpec = false
 				atStmtStart = true
 			}
 		case "BEGIN":
@@ -386,7 +379,7 @@ func collectRenamableLocals(s string) map[string]struct{} {
 			}
 			atStmtStart = false
 		default:
-			if inDecl() && parenDepth == 0 && atStmtStart {
+			if canCollect() && parenDepth == 0 && atStmtStart {
 				switch t.up {
 				case "CURSOR", "TYPE", "SUBTYPE":
 					if j+1 < len(toks) && toks[j+1].kind == 'i' {
@@ -411,53 +404,26 @@ func collectRenamableLocals(s string) map[string]struct{} {
 
 // countLocalOccurrences counts, per UPPER-cased local name, how often it occurs
 // as a standalone (non-member) identifier, and records the first original
-// spelling seen. The frequency drives short-name assignment; the spelling is
-// the deobfuscation target.
+// spelling seen (the deobfuscation target).
 func countLocalOccurrences(s string, locals map[string]struct{}) (map[string]int, map[string]string) {
 	freq := make(map[string]int)
 	orig := make(map[string]string)
 	var prevSig byte
 	for i := 0; i < len(s); {
+		if end, kind := lexemeEnd(s, i); kind != 0 {
+			switch kind {
+			case 's':
+				prevSig = '\''
+			case 'd':
+				prevSig = '"'
+			default:
+				prevSig = 0
+			}
+			i = end
+			continue
+		}
 		c := s[i]
 		switch {
-		case c == '\'':
-			i++
-			for i < len(s) {
-				if s[i] == '\'' {
-					if i+1 < len(s) && s[i+1] == '\'' {
-						i += 2
-						continue
-					}
-					i++
-					break
-				}
-				i++
-			}
-			prevSig = '\''
-		case c == '-' && i+1 < len(s) && s[i+1] == '-':
-			i += 2
-			for i < len(s) && s[i] != '\n' && s[i] != '\r' {
-				i++
-			}
-			prevSig = 0
-		case c == '/' && i+1 < len(s) && s[i+1] == '*':
-			i += 2
-			for i+1 < len(s) && !(s[i] == '*' && s[i+1] == '/') {
-				i++
-			}
-			if i+1 < len(s) {
-				i += 2
-			}
-			prevSig = 0
-		case c == '"':
-			i++
-			for i < len(s) && s[i] != '"' {
-				i++
-			}
-			if i < len(s) {
-				i++
-			}
-			prevSig = '"'
 		case isIDStart(c):
 			st := i
 			for i < len(s) && isIDChar(s[i]) {
@@ -473,6 +439,9 @@ func countLocalOccurrences(s string, locals map[string]struct{}) (map[string]int
 				}
 			}
 			prevSig = 'a'
+		case isDigit(c):
+			i = numberEnd(s, i)
+			prevSig = '0'
 		case c == ' ' || c == '\t' || c == '\n' || c == '\r':
 			i++
 		case c == '.':
@@ -509,60 +478,78 @@ func collectAllIdentifiers(s string) map[string]struct{} {
 	return all
 }
 
-// makeMapping assigns short names to identifiers, ranking by frequency (desc),
-// then length (desc), then name (desc), and skipping any short name that
-// collides with a reserved word or an existing identifier.
-func makeMapping(freq map[string]int, allIDs, reserved map[string]struct{}) map[string]string {
-	type kv struct {
-		name  string
-		count int
-	}
-	sorted := make([]kv, 0, len(freq))
-	for name, count := range freq {
-		sorted = append(sorted, kv{name, count})
-	}
-	sort.Slice(sorted, func(a, b int) bool {
-		if sorted[a].count != sorted[b].count {
-			return sorted[a].count > sorted[b].count
-		}
-		if len(sorted[a].name) != len(sorted[b].name) {
-			return len(sorted[a].name) > len(sorted[b].name)
-		}
-		return sorted[a].name > sorted[b].name
-	})
-
-	mapping := make(map[string]string, len(sorted))
-	idx := 0
-	for _, e := range sorted {
-		var short string
-		for {
-			short = shortName(idx)
-			idx++
-			up := strings.ToUpper(short)
-			_, isRes := reserved[up]
-			_, isID := allIDs[up]
-			if !isRes && !isID {
-				break
+// makeMapping assigns every name (UPPER-cased, sorted by the caller) a random
+// identifier of the same length, skipping anything that collides with a reserved
+// word, an identifier already present in the source, or a previously generated
+// name. Same-length names keep column positions identical to the original
+// source, and randomness (a fresh seed per run) avoids leaking any ordering.
+func makeMapping(names []string, allIDs, reserved map[string]struct{}) map[string]string {
+	mapping := make(map[string]string, len(names))
+	used := make(map[string]struct{}, len(names))
+	for _, up := range names {
+		n := len(up)
+		for attempt := 0; ; attempt++ {
+			if attempt > 0 && attempt%1000 == 0 {
+				n++ // name space for this length is crowded; widen (very unlikely)
 			}
+			cand := randomIdent(n)
+			cu := strings.ToUpper(cand)
+			if _, ok := reserved[cu]; ok {
+				continue
+			}
+			if _, ok := allIDs[cu]; ok {
+				continue
+			}
+			if _, ok := used[cu]; ok {
+				continue
+			}
+			if isReserved(cand) {
+				continue
+			}
+			used[cu] = struct{}{}
+			mapping[up] = cand
+			break
 		}
-		mapping[e.name] = short
 	}
 	return mapping
 }
 
-// shortName converts idx to a short identifier the same way the reference does:
-// append 'a'+(n%26) least-significant first, dividing by 26 each step.
-func shortName(idx int) string {
-	var b []byte
-	n := idx
-	for {
-		b = append(b, byte('a'+(n%26)))
-		n /= 26
-		if n == 0 {
-			break
+const (
+	identFirst = "abcdefghijklmnopqrstuvwxyz"
+	identRest  = "abcdefghijklmnopqrstuvwxyz0123456789_"
+)
+
+// randomIdent returns a random valid unquoted identifier of length n (n >= 2).
+// It starts with a letter and always contains at least one digit or underscore
+// after it, so it can never equal a PL/SQL keyword.
+func randomIdent(n int) string {
+	if n < 2 {
+		n = 2
+	}
+	b := make([]byte, n)
+	b[0] = identFirst[randN(len(identFirst))]
+	hasSpecial := false
+	for i := 1; i < n; i++ {
+		c := identRest[randN(len(identRest))]
+		if c == '_' || isDigit(c) {
+			hasSpecial = true
 		}
+		b[i] = c
+	}
+	if !hasSpecial {
+		const special = "0123456789_"
+		b[1+randN(n-1)] = special[randN(len(special))]
 	}
 	return string(b)
+}
+
+// randN returns a uniformly random int in [0, n) from the system CSPRNG.
+func randN(n int) int {
+	v, err := rand.Int(rand.Reader, big.NewInt(int64(n)))
+	if err != nil {
+		panic("ucwrap: crypto/rand failed: " + err.Error())
+	}
+	return int(v.Int64())
 }
 
 // replaceIdentifiers rewrites identifiers per mapping (keyed by UPPER-cased
@@ -577,60 +564,21 @@ func replaceIdentifiers(s string, mapping map[string]string) string {
 	var prevSig byte // last non-whitespace byte consumed from the source
 	i := 0
 	for i < len(s) {
+		if end, kind := lexemeEnd(s, i); kind != 0 {
+			out.WriteString(s[i:end])
+			switch kind {
+			case 's':
+				prevSig = '\''
+			case 'd':
+				prevSig = '"'
+			default:
+				prevSig = 0
+			}
+			i = end
+			continue
+		}
 		c := s[i]
 		switch {
-		case c == '\'':
-			out.WriteByte(c)
-			i++
-			for i < len(s) {
-				out.WriteByte(s[i])
-				if s[i] == '\'' {
-					if i+1 < len(s) && s[i+1] == '\'' {
-						i++
-						out.WriteByte(s[i])
-					} else {
-						i++
-						break
-					}
-				}
-				i++
-			}
-			prevSig = '\''
-		case c == '-' && i+1 < len(s) && s[i+1] == '-':
-			out.WriteByte(c)
-			out.WriteByte(s[i+1])
-			i += 2
-			for i < len(s) && s[i] != '\n' && s[i] != '\r' {
-				out.WriteByte(s[i])
-				i++
-			}
-			prevSig = 0
-		case c == '/' && i+1 < len(s) && s[i+1] == '*':
-			out.WriteByte(c)
-			out.WriteByte(s[i+1])
-			i += 2
-			for i+1 < len(s) && !(s[i] == '*' && s[i+1] == '/') {
-				out.WriteByte(s[i])
-				i++
-			}
-			if i+1 < len(s) {
-				out.WriteByte(s[i])
-				out.WriteByte(s[i+1])
-				i += 2
-			}
-			prevSig = 0
-		case c == '"':
-			out.WriteByte(c)
-			i++
-			for i < len(s) && s[i] != '"' {
-				out.WriteByte(s[i])
-				i++
-			}
-			if i < len(s) {
-				out.WriteByte(s[i])
-				i++
-			}
-			prevSig = '"'
 		case isIDStart(c):
 			start := i
 			for i < len(s) && isIDChar(s[i]) {
@@ -645,6 +593,11 @@ func replaceIdentifiers(s string, mapping map[string]string) string {
 				out.WriteString(word)
 			}
 			prevSig = 'a'
+		case isDigit(c):
+			end := numberEnd(s, i)
+			out.WriteString(s[i:end])
+			i = end
+			prevSig = '0'
 		case c == ' ' || c == '\t' || c == '\n' || c == '\r':
 			out.WriteByte(c)
 			i++
@@ -723,42 +676,17 @@ func protectPackageSpec(clean string, reserved map[string]struct{}) {
 	}
 	i := 0
 	for i < bodyPos {
-		switch {
-		case clean[i] == '\'':
-			i++
-			for i < bodyPos {
-				if clean[i] == '\'' {
-					if i+1 < bodyPos && clean[i+1] == '\'' {
-						i++
-					} else {
-						break
-					}
-				}
-				i++
-			}
-			i++
-		case clean[i] == '-' && i+1 < len(clean) && clean[i+1] == '-':
-			i += 2
-			for i < bodyPos && clean[i] != '\n' && clean[i] != '\r' {
-				i++
-			}
-		case clean[i] == '/' && i+1 < len(clean) && clean[i+1] == '*':
-			i += 2
-			for i+1 < bodyPos && !(clean[i] == '*' && clean[i+1] == '/') {
-				i++
-			}
-			if i+1 < bodyPos {
-				i += 2
-			} else {
-				i++
-			}
-		case isIDStart(clean[i]):
+		if end, kind := lexemeEnd(clean, i); kind != 0 {
+			i = end
+			continue
+		}
+		if isIDStart(clean[i]) {
 			st := i
 			for i < bodyPos && isIDChar(clean[i]) {
 				i++
 			}
 			reserved[strings.ToUpper(clean[st:i])] = struct{}{}
-		default:
+		} else {
 			i++
 		}
 	}
@@ -886,83 +814,6 @@ func stringToMapping(s string) map[string]string {
 // Formatting transforms
 // ------------------------------------------------------------------
 
-// stripFormatting joins lines and collapses whitespace to make the obfuscated
-// output maximally compact. -- comments are kept on their own line.
-func stripFormatting(src string) string {
-	var out strings.Builder
-	needSpace := false
-	atLineStart := true
-	lastByte := func() byte {
-		s := out.String()
-		if len(s) == 0 {
-			return 0
-		}
-		return s[len(s)-1]
-	}
-	for i := 0; i < len(src); i++ {
-		c := src[i]
-		if c == '\'' {
-			if needSpace && out.Len() > 0 && lastByte() != ' ' && lastByte() != '\n' {
-				out.WriteByte(' ')
-			}
-			needSpace = false
-			atLineStart = false
-			out.WriteByte(c)
-			i++
-			for i < len(src) {
-				out.WriteByte(src[i])
-				if src[i] == '\'' {
-					if i+1 < len(src) && src[i+1] == '\'' {
-						i++
-						out.WriteByte(src[i])
-					} else {
-						break
-					}
-				}
-				i++
-			}
-			continue
-		}
-		if c == '-' && i+1 < len(src) && src[i+1] == '-' {
-			if out.Len() > 0 && lastByte() != '\n' {
-				out.WriteByte('\n')
-			}
-			out.WriteByte(c)
-			out.WriteByte(src[i+1])
-			i += 2
-			for i < len(src) && src[i] != '\n' && src[i] != '\r' {
-				out.WriteByte(src[i])
-				i++
-			}
-			out.WriteByte('\n')
-			needSpace = false
-			atLineStart = true
-			continue
-		}
-		if c == '\n' || c == '\r' {
-			needSpace = true
-			atLineStart = true
-			continue
-		}
-		if atLineStart && (c == ' ' || c == '\t') {
-			continue
-		}
-		atLineStart = false
-		if c == ' ' || c == '\t' {
-			if out.Len() > 0 && lastByte() != ' ' && lastByte() != '\n' {
-				out.WriteByte(' ')
-			}
-			continue
-		}
-		if needSpace && out.Len() > 0 && lastByte() != ' ' {
-			out.WriteByte(' ')
-		}
-		needSpace = false
-		out.WriteByte(c)
-	}
-	return out.String()
-}
-
 // reindentPLSQL applies minimal, safe indentation: it only adjusts depth for
 // lines beginning with END (dedent) and lines beginning with BEGIN (indent).
 func reindentPLSQL(src string) string {
@@ -997,47 +848,26 @@ func reindentPLSQL(src string) string {
 	for i := 0; i < len(src); i++ {
 		c := src[i]
 		switch {
-		case c == '\'':
-			line.WriteByte(c)
-			i++
-			for i < len(src) {
-				line.WriteByte(src[i])
-				if src[i] == '\'' {
-					if i+1 < len(src) && src[i+1] == '\'' {
-						i++
-						line.WriteByte(src[i])
-					} else {
-						break
-					}
-				}
-				i++
+		case lexKind(src, i) != 0:
+			end, kind := lexemeEnd(src, i)
+			if kind == 'c' && src[i] == '-' {
+				flush()
+				line.WriteString(src[i:end])
+				flush()
+			} else {
+				line.WriteString(src[i:end])
 			}
-		case c == '-' && i+1 < len(src) && src[i+1] == '-':
-			flush()
-			line.WriteByte(c)
-			line.WriteByte(src[i+1])
-			i += 2
-			for i < len(src) && src[i] != '\n' && src[i] != '\r' {
-				line.WriteByte(src[i])
-				i++
-			}
-			flush()
-		case c == '/' && i+1 < len(src) && src[i+1] == '*':
-			line.WriteString("/*")
-			i += 2
-			for i+1 < len(src) && !(src[i] == '*' && src[i+1] == '/') {
-				line.WriteByte(src[i])
-				i++
-			}
-			if i+1 < len(src) {
-				line.WriteString("*/")
-				i += 2
-			}
+			i = end - 1
 		case c == '(':
 			line.WriteByte(c)
 			d := 1
 			i++
 			for i < len(src) && d > 0 {
+				if end, kind := lexemeEnd(src, i); kind != 0 {
+					line.WriteString(src[i:end])
+					i = end
+					continue
+				}
 				if src[i] == '(' {
 					d++
 				} else if src[i] == ')' {
@@ -1067,4 +897,10 @@ func reindentPLSQL(src string) string {
 	}
 	flush()
 	return out.String()
+}
+
+// lexKind returns the lexeme kind starting at s[i] (see lexemeEnd), or 0.
+func lexKind(s string, i int) byte {
+	_, k := lexemeEnd(s, i)
+	return k
 }

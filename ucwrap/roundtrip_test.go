@@ -23,7 +23,7 @@ func TestRoundTripFunctionExact(t *testing.T) {
 		"END;\n"
 	got := wrapUnwrap(t, src, false)
 	want := "CREATE OR REPLACE FUNCTION f RETURN NUMBER IS\n" +
-		"  X NUMBER := 42; \n" +
+		"  X NUMBER := 42; " + strings.Repeat(" ", len("/* magic */")) + "\n" + // comment blanked, not removed
 		"BEGIN\n" +
 		"  RETURN X;\n" +
 		"END;\n/\n"

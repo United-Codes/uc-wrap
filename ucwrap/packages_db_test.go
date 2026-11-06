@@ -198,7 +198,7 @@ func TestPackagesObfuscateInstalls(t *testing.T) {
 				t.Fatalf("Deobfuscate: %v", err)
 			}
 			restoredUp := strings.ToUpper(restored)
-			locals := collectRenamableLocals(stripComments(bodySrc))
+			locals := renamableLocals(stripComments(bodySrc))
 			missing := 0
 			for up := range locals {
 				if !strings.Contains(restoredUp, up) {
@@ -223,4 +223,93 @@ func countB64Lines(wrapped string) int {
 		}
 	}
 	return n
+}
+
+const captureSpec = `create or replace package ucw_capture as
+  function run return varchar2;
+end ucw_capture;`
+
+// captureBody exercises the situations where naively renaming a "local" changes
+// behaviour without any compile error: a local named like a table column
+// (status), a local named like a record field / parameter / named argument
+// (amount), and a q'[...]' literal containing identifier names and quotes.
+const captureBody = `create or replace package body ucw_capture as
+  status   varchar2(10) := 'Z';
+  amount   number := 99;
+  g_note   varchar2(100) := q'[it's amount status -- literal]';
+  g_total  number;
+  type t_rec is record (amount number, label varchar2(10));
+
+  function sum_big (amount in number) return number
+  is
+    l_rec t_rec;
+    l_n   number;
+  begin
+    l_rec.amount := amount * 2;
+    select count(*) into l_n from ucw_cap_t where status = 'A' and ucw_cap_t.amount > 0;
+    return l_rec.amount + l_n;
+  end sum_big;
+
+  function run return varchar2
+  is
+  begin
+    g_total := sum_big(amount => 5);
+    return g_note || '|' || g_total || '|' || status;
+  end run;
+end ucw_capture;`
+
+// runCapture installs the table + spec + the given body and returns what
+// ucw_capture.run produces.
+func runCapture(t *testing.T, unit string) string {
+	t.Helper()
+	script := "set feedback off\nset define off\nset heading off\nset pagesize 0\nset linesize 1000\n" +
+		"begin execute immediate 'drop table ucw_cap_t purge'; exception when others then null; end;\n/\n" +
+		"create table ucw_cap_t (status varchar2(10), amount number);\n" +
+		"insert into ucw_cap_t values ('A', 1);\ninsert into ucw_cap_t values ('A', 2);\ninsert into ucw_cap_t values ('B', 3);\ncommit;\n" +
+		captureSpec + "\n/\n" + unit + "\n" +
+		"prompt <<<B>>>\nselect ucw_capture.run from dual;\nprompt <<<E>>>\n" +
+		"drop package ucw_capture;\ndrop table ucw_cap_t purge;\n"
+	return strings.TrimSpace(extractBetween(runSQL(t, script), "<<<B>>>", "<<<E>>>"))
+}
+
+// TestPackagesObfuscatedBehaviourMatchesPlain installs a plain and an
+// obfuscated+wrapped version of the same package and requires identical
+// runtime results (not merely identical compile errors).
+func TestPackagesObfuscatedBehaviourMatchesPlain(t *testing.T) {
+	plain := runCapture(t, captureBody+"\n/")
+	const want = "it's amount status -- literal|12|Z"
+	if plain != want {
+		t.Fatalf("plain run = %q, want %q (test setup problem)", plain, want)
+	}
+	obf, err := Obfuscate(captureBody, "pw", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(SplitEnc(obf).Body, "g_total") {
+		t.Errorf("expected g_total to be renamed:\n%s", SplitEnc(obf).Body)
+	}
+	if got := runCapture(t, WrapObfuscated(obf, false)); got != plain {
+		t.Errorf("obfuscated behaviour differs from plain:\n got  %q\n want %q", got, plain)
+	}
+}
+
+// TestPackagesObfuscateSpecAndBodyInOneFile verifies that a spec and body in a
+// single file can be obfuscated together (layout is preserved, so
+// WrapObfuscated can find each CREATE) and that the result installs and runs.
+func TestPackagesObfuscateSpecAndBodyInOneFile(t *testing.T) {
+	spec, body, _ := loadFixture(t, "UCW_STRINGS")
+	obf, err := Obfuscate(spec+"\n/\n"+body, "pw", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wrapped := WrapObfuscated(obf, false)
+	if n := strings.Count(wrapped, " wrapped \n"); n != 2 {
+		t.Fatalf("expected 2 wrapped units, got %d", n)
+	}
+	t.Cleanup(func() { runSQL(t, "DROP PACKAGE ucw_strings;\n") })
+	script := "set feedback off\nset define off\nset heading off\nset pagesize 0\n" +
+		wrapped + "\nprompt <<<B>>>\nselect ucw_strings.reverse_text('abc') || ucw_strings.count_words('a b c') from dual;\nprompt <<<E>>>\n"
+	if got := strings.TrimSpace(extractBetween(runSQL(t, script), "<<<B>>>", "<<<E>>>")); got != "cba3" {
+		t.Errorf("got %q, want cba3", got)
+	}
 }

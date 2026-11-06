@@ -12,7 +12,9 @@ func TestStripComments(t *testing.T) {
 		want string
 	}{
 		{"single-line", "a := 1; -- comment\nb := 2;", "a := 1; \nb := 2;"},
-		{"multi-line", "a := 1; /* c\nomment */ b := 2;", "a := 1;  b := 2;"},
+		{"multi-line keeps line breaks", "a := 1; /* c\nomment */ b := 2;", "a := 1;     \n          b := 2;"},
+		{"adjacent tokens never fuse", "a/**/b", "a    b"},
+		{"alt-quoted literal", "x := q'[it's -- not /* a comment */]'; -- gone", "x := q'[it's -- not /* a comment */]'; "},
 		{"comment markers in string", "x := '-- not a comment';", "x := '-- not a comment';"},
 		{"slashstar in string", "x := '/* not */';", "x := '/* not */';"},
 		{"escaped quote", "x := 'it''s ok'; -- gone", "x := 'it''s ok'; "},
@@ -127,6 +129,33 @@ func TestSplitBase64AvoidsLeadingSlash(t *testing.T) {
 		}
 		if i > 0 && strings.HasPrefix(l, "/") {
 			t.Errorf("line %d starts with '/': %q", i, l)
+		}
+	}
+}
+
+func TestUpperPreservingAltQuoteAndQuotedIdent(t *testing.T) {
+	in := `select q'[it's Mixed]', "MixedCol", 'Lit' from dual`
+	want := `SELECT q'[it's Mixed]', "MixedCol", 'Lit' FROM DUAL`
+	if got := upperPreservingStrings(in); got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
+// Wrapping must not move code to different lines: Oracle reports error lines
+// relative to the wrapped text, so block comments are blanked, not deleted.
+func TestWrapPreservesLineNumbers(t *testing.T) {
+	src := "CREATE OR REPLACE PROCEDURE p IS\n  /* a\n     multi-line\n     comment */\n  x NUMBER; -- trailing\nBEGIN\n  x := 1;\nEND;\n"
+	back, err := UnwrapV2(WrapV2(src, false, false))
+	if err != nil {
+		t.Fatal(err)
+	}
+	line := func(s, needle string) int {
+		i := strings.Index(strings.ToUpper(s), needle)
+		return strings.Count(s[:i], "\n")
+	}
+	for _, needle := range []string{"X NUMBER", "BEGIN", "X := 1"} {
+		if got, want := line(back, needle), line(src, strings.ToUpper(needle)); got != want {
+			t.Errorf("%q moved from line %d to %d", needle, want, got)
 		}
 	}
 }
