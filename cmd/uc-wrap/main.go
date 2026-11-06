@@ -23,7 +23,8 @@ import (
 	"github.com/United-Codes/uc-wrap/ucwrap"
 )
 
-const version = "0.1.0 (Go port)"
+// version is overridden at release time via -ldflags "-X main.version=<tag>".
+var version = "dev"
 
 func main() {
 	if len(os.Args) < 2 {

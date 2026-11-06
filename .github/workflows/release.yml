@@ -19,20 +19,34 @@ jobs:
           go-version-file: go.mod
       - name: Run tests
         run: go test ./...
-      - name: Build binaries
+      - name: Build archives
         env:
           CGO_ENABLED: '0'
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
         run: |
+          set -eu
+          version="${RELEASE_TAG#v}"
           mkdir -p dist
           for os in linux darwin windows; do
             for arch in amd64 arm64; do
-              output="dist/uc-wrap_${os}_${arch}"
+              bin=uc-wrap
+              if [ "$os" = windows ]; then bin=uc-wrap.exe; fi
+              stage="$(mktemp -d)"
+              GOOS="$os" GOARCH="$arch" go build -trimpath \
+                -ldflags="-s -w -X main.version=${version}" \
+                -o "$stage/$bin" ./cmd/uc-wrap
+              cp README.md "$stage/"
+              name="uc-wrap_${os}_${arch}"
               if [ "$os" = windows ]; then
-                output="${output}.exe"
+                (cd "$stage" && zip -q "$GITHUB_WORKSPACE/dist/${name}.zip" *)
+              else
+                (cd "$stage" && tar -czf "$GITHUB_WORKSPACE/dist/${name}.tar.gz" *)
               fi
-              GOOS="$os" GOARCH="$arch" go build -trimpath -ldflags='-s -w' -o "$output" ./cmd/uc-wrap
+              rm -rf "$stage"
             done
           done
+          (cd dist && sha256sum * > checksums.txt)
+          cat dist/checksums.txt
       - name: Attach binaries to release
         env:
           GH_TOKEN: ${{ github.token }}

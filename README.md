@@ -14,6 +14,20 @@ port of [Cameron Marshall's PL/SQL Unwrapper][original]. The legacy V1
 
 ## Install / build
 
+Download a release archive (`uc-wrap_<os>_<arch>.tar.gz`, or `.zip` on Windows)
+from the [releases page](https://github.com/United-Codes/uc-wrap/releases) and
+verify it against `checksums.txt`. In a GitHub Action:
+
+```yaml
+- run: |
+    curl -fsSLO https://github.com/United-Codes/uc-wrap/releases/latest/download/uc-wrap_linux_amd64.tar.gz
+    curl -fsSLO https://github.com/United-Codes/uc-wrap/releases/latest/download/checksums.txt
+    grep ' uc-wrap_linux_amd64.tar.gz$' checksums.txt | sha256sum -c -
+    tar -xzf uc-wrap_linux_amd64.tar.gz uc-wrap
+```
+
+Or build from source:
+
 ```sh
 go build ./cmd/uc-wrap
 ```
